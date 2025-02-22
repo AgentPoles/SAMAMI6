@@ -1,22 +1,37 @@
-/* Initial beliefs and rules */
-random_dir(DirList,RandomNumber,Dir) :- (RandomNumber <= 0.25 & .nth(0,DirList,Dir)) | (RandomNumber <= 0.5 & .nth(1,DirList,Dir)) | (RandomNumber <= 0.75 & .nth(2,DirList,Dir)) | (.nth(3,DirList,Dir)).
+// Initial beliefs and rules
+current_step(0).
+lastAction(none).
+myPos(0,0).
 
-/* Initial goals */
+// Step handling with belief persistence
++step(S) : true <- 
+    ?current_step(CS);
+    -+current_step(S);  // Only update step counter
+    .findall([X,Y,V], map(X,Y,V), Map);
+    .my_name(Name);
+    .print(Name, " at step ", S, " knows: ", Map).
 
-!start.
+// Perception handlers with persistent beliefs
++thing(X,Y,dispenser,Type)[source(percept)] : true <- 
+    ?current_step(S);
+    +map(X,Y,Type)[step(S)].  // Add with step annotation
 
-/* Plans */
++thing(X,Y,block,Type)[source(percept)] : true <- 
+    ?current_step(S);
+    +map(X,Y,Type)[step(S)].
 
-+!start : true <- 
-	.print("hello massim world.").
++thing(X,Y,entity,Type)[source(percept)] : true <- 
+    ?current_step(S);
+    +map(X,Y,Type)[step(S)].
 
-+step(X) : true <-
-	.print("Received step percept.").
-	
-+actionID(X) : true <- 
-	.print("Determining my action");
-	!move_random.
-//	skip.
++obstacle(X,Y)[source(percept)] : true <- 
+    ?current_step(S);
+    +map(X,Y,ob)[step(S)].
 
-+!move_random : .random(RandomNumber) & random_dir([n,s,e,w],RandomNumber,Dir)
-<-	move(Dir).
++goal(X,Y)[source(percept)] : true <- 
+    ?current_step(S);
+    +map(X,Y,goal)[step(S)].
+
+// Position update
++pos(X,Y)[source(percept)] : true <-
+    -+myPos(X,Y).
