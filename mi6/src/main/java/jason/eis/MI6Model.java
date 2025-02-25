@@ -7,66 +7,156 @@ import jason.environment.Environment;
 import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 public class MI6Model {
-  private Logger logger = Logger.getLogger(
+  private final Logger logger = Logger.getLogger(
     "MI6Model." + MI6Model.class.getName()
   );
-  private EnvironmentInterfaceStandard ei;
-  private Random random = new Random();
+  private final EnvironmentInterfaceStandard ei;
+  private final Random random = new Random();
   private static final String[] DIRECTIONS = { "n", "s", "e", "w" };
+  private static final int STUCK_THRESHOLD = 3;
+  private static final int CLOSE_TARGET_DISTANCE = 5;
 
-  // Zone management
-  private Map<String, Point> agentZones = new HashMap<>();
-  private Map<String, Integer> zoneSteps = new HashMap<>();
+  // Pre-compute direction opposites for O(1) lookup
+  private static final Map<String, String> OPPOSITE_DIRECTIONS = new HashMap<>(
+    4
+  ) {
+
+    {
+      put("n", "s");
+      put("s", "n");
+      put("e", "w");
+      put("w", "e");
+    }
+  };
+
+  // Movement tracking with efficient data structures
+  private final Map<String, MovementHistory> agentMovement = new HashMap<>();
+
+  // Add failure type constants
+  private static final String FAILED_PATH = "failed_path";
+  private static final String FAILED_FORBIDDEN = "failed_forbidden";
+  private static final String FAILED_PARAMETER = "failed_parameter";
+  private static final int MAX_FAILURES_PER_DIRECTION = 3;
+
+  // Optimized zone constants
   private static final int ZONE_SIZE = 10;
   private static final int STEPS_BEFORE_ZONE_CHANGE = 15;
+  private static final double ZONE_CHANGE_PROBABILITY = 0.3; // 30% chance to change zone when threshold met
+  private static final int MAX_ZONE_DISTANCE = 50; // Prevent zones from getting too far from center
 
-  // Target management
-  private Map<String, Point> currentTargets = new HashMap<>();
-  private Map<String, Integer> targetAttempts = new HashMap<>();
-  private Map<String, List<Point>> recentTargets = new HashMap<>();
-  private static final int MAX_TARGET_ATTEMPTS = 10;
-  private static final int MAX_RECENT_TARGETS = 3;
+  private static final int BOUNDARY_ESCAPE_ATTEMPTS = 5;
+  private static final double RANDOM_ESCAPE_PROBABILITY = 0.4; // 40% chance for random direction when stuck
 
-  // Movement tracking
-  private Map<String, MovementHistory> agentMovement = new HashMap<>();
-  private static final int STUCK_THRESHOLD = 3;
-  private static final int CLOSE_TARGET_DISTANCE = 5; // Consider target "close" within 5 steps
-
-  private static class Point {
-    int x, y;
-
-    Point(int x, int y) {
-      this.x = x;
-      this.y = y;
-    }
-
-    @Override
-    public boolean equals(Object o) {
-      if (this == o) return true;
-      if (o == null || getClass() != o.getClass()) return false;
-      Point point = (Point) o;
-      return x == point.x && y == point.y;
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(x, y);
-    }
-  }
-
-  private class MovementHistory {
+  private static class MovementHistory {
     Point lastPosition;
     int stuckCount;
     String lastFailure;
+    int failureCount;
+    Map<String, Integer> directionFailures;
+    Set<String> boundaryDirections; // Track known boundary directions
+    int boundaryEscapeAttempts;
+    long lastUpdateTime;
 
     MovementHistory() {
       lastPosition = new Point(0, 0);
       stuckCount = 0;
       lastFailure = null;
+      failureCount = 0;
+      directionFailures = new HashMap<>();
+      boundaryDirections = new HashSet<>();
+      boundaryEscapeAttempts = 0;
+      lastUpdateTime = System.currentTimeMillis();
+    }
+
+    void recordFailure(String direction, String failureType) {
+      lastFailure = failureType;
+      failureCount++;
+      directionFailures.merge(direction, 1, Integer::sum);
+    }
+
+    void recordSuccess() {
+      lastFailure = null;
+      failureCount = 0;
+      directionFailures.clear();
+    }
+
+    boolean isDirectionReliable(String direction) {
+      return (
+        directionFailures.getOrDefault(direction, 0) <
+        MAX_FAILURES_PER_DIRECTION
+      );
+    }
+
+    void recordBoundary(String direction) {
+      boundaryDirections.add(direction);
+      boundaryEscapeAttempts++;
+    }
+
+    void clearBoundaryAttempts() {
+      boundaryEscapeAttempts = 0;
     }
   }
+
+  private static class Point {
+    final int x;
+    final int y;
+    final int hashCode;
+
+    Point(int x, int y) {
+      this.x = x;
+      this.y = y;
+      this.hashCode = Objects.hash(x, y);
+    }
+
+    @Override
+    public int hashCode() {
+      return hashCode;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (!(o instanceof Point)) return false;
+      Point p = (Point) o;
+      return x == p.x && y == p.y;
+    }
+  }
+
+  private static class Zone {
+    int x, y;
+    int stepsInZone;
+    long lastVisitTime;
+    Set<Point> exploredPoints;
+
+    Zone(int x, int y) {
+      this.x = x;
+      this.y = y;
+      this.stepsInZone = 0;
+      this.lastVisitTime = System.currentTimeMillis();
+      this.exploredPoints = new HashSet<>();
+    }
+
+    boolean isFullyExplored() {
+      return exploredPoints.size() >= ZONE_SIZE * ZONE_SIZE * 0.7; // 70% explored
+    }
+
+    void recordExploration(Point p) {
+      exploredPoints.add(p);
+      stepsInZone++;
+    }
+
+    void reset() {
+      stepsInZone = 0;
+      lastVisitTime = System.currentTimeMillis();
+      exploredPoints.clear();
+    }
+  }
+
+  // Track zones per agent
+  private final Map<String, Zone> agentZones = new HashMap<>();
 
   public MI6Model(EnvironmentInterfaceStandard ei) {
     this.ei = ei;
@@ -74,27 +164,36 @@ public class MI6Model {
 
   public boolean moveTowards(String agName, String direction) {
     try {
-      ei.performAction(agName, new Action("move", new Identifier(direction)));
-      // Reset failure tracking on successful move
-      MovementHistory history = agentMovement.get(agName);
-      if (history != null) {
-        history.lastFailure = null;
-      }
-      return true;
-    } catch (Exception e) {
-      // Track the failure type
       MovementHistory history = agentMovement.computeIfAbsent(
         agName,
         k -> new MovementHistory()
       );
-      String message = e.getMessage().toLowerCase();
-      if (message.contains("failed_forbidden")) {
-        history.lastFailure = "failed_forbidden";
-      } else if (message.contains("failed_path")) {
-        history.lastFailure = "failed_path";
-      }
-      logger.log(Level.SEVERE, "Error in moveTowards", e);
+      ei.performAction(agName, new Action("move", new Identifier(direction)));
+      history.recordSuccess();
+      return true;
+    } catch (Exception e) {
+      handleMoveFailure(agName, direction, e);
       return false;
+    }
+  }
+
+  private void handleMoveFailure(String agName, String direction, Exception e) {
+    String message = e.getMessage().toLowerCase();
+    MovementHistory history = agentMovement.get(agName);
+
+    if (history != null) {
+      if (message.contains(FAILED_PATH)) {
+        history.recordFailure(direction, FAILED_PATH);
+        logger.fine("Agent " + agName + " blocked in direction " + direction);
+      } else if (message.contains(FAILED_FORBIDDEN)) {
+        history.recordFailure(direction, FAILED_FORBIDDEN);
+        logger.fine(
+          "Agent " + agName + " hit boundary in direction " + direction
+        );
+      } else if (message.contains(FAILED_PARAMETER)) {
+        history.recordFailure(direction, FAILED_PARAMETER);
+        logger.warning("Agent " + agName + " invalid direction: " + direction);
+      }
     }
   }
 
@@ -123,7 +222,12 @@ public class MI6Model {
 
   public String chooseBestDirection(String agName, int targetX, int targetY) {
     try {
-      // First check if we're stuck
+      // Fast path: check if we're aligned and path is clear
+      if (isAlignedAndClear(agName, targetX, targetY)) {
+        return getAlignedDirection(targetX, targetY);
+      }
+
+      // Get current position (now with fallback)
       Point currentPos = getCurrentPosition(agName);
       MovementHistory history = agentMovement.computeIfAbsent(
         agName,
@@ -131,8 +235,7 @@ public class MI6Model {
       );
 
       if (currentPos.equals(history.lastPosition)) {
-        history.stuckCount++;
-        if (history.stuckCount >= STUCK_THRESHOLD) {
+        if (++history.stuckCount >= STUCK_THRESHOLD) {
           String escapeDir = handleStuckAgent(agName, history.lastFailure);
           if (escapeDir != null) return escapeDir;
         }
@@ -141,187 +244,59 @@ public class MI6Model {
         history.lastPosition = currentPos;
       }
 
-      // If we have a target, determine if it's close
-      if (targetX != 0 || targetY != 0) {
-        boolean isClose =
-          Math.abs(targetX) <= CLOSE_TARGET_DISTANCE &&
-          Math.abs(targetY) <= CLOSE_TARGET_DISTANCE;
+      // Get available directions (O(1) as we only check 4 directions)
+      DirectionInfo dirInfo = analyzeDirections(agName, targetX, targetY);
 
-        // If we're aligned with a close target, prioritize direct movement
-        if (isClose) {
-          if (targetX == 0) {
-            if (
-              targetY < 0 && checkSafeDirection(agName, "n") != null
-            ) return "n";
-            if (
-              targetY > 0 && checkSafeDirection(agName, "s") != null
-            ) return "s";
-          }
-          if (targetY == 0) {
-            if (
-              targetX < 0 && checkSafeDirection(agName, "w") != null
-            ) return "w";
-            if (
-              targetX > 0 && checkSafeDirection(agName, "e") != null
-            ) return "e";
-          }
-        }
-
-        // For close targets, prefer moving towards target even if not aligned
-        if (isClose) {
-          Map<String, Double> risks = evaluateRisks(agName, targetX, targetY);
-          String bestDir = null;
-          double bestRisk = Double.MAX_VALUE;
-
-          // Find safest direction that moves closer to target
-          for (Map.Entry<String, Double> entry : risks.entrySet()) {
-            if (entry.getValue() < 1000.0 && entry.getValue() < bestRisk) {
-              String dir = entry.getKey();
-              boolean movesCloser =
-                (targetX < 0 && dir.equals("w")) ||
-                (targetX > 0 && dir.equals("e")) ||
-                (targetY < 0 && dir.equals("n")) ||
-                (targetY > 0 && dir.equals("s"));
-
-              if (movesCloser) {
-                bestDir = dir;
-                bestRisk = entry.getValue();
-              }
-            }
-          }
-
-          if (bestDir != null) return bestDir;
-        }
+      // If we have safe directions towards target, use them
+      if (!dirInfo.safeTowardsTarget.isEmpty()) {
+        return dirInfo.safeTowardsTarget.get(0);
       }
 
-      // If no close target or couldn't move directly, use alternative strategy
-      return chooseAlternativeDirection(agName, targetX, targetY);
+      // If we have any safe directions, use the best available
+      if (!dirInfo.allSafe.isEmpty()) {
+        return getBestSafeDirection(dirInfo.allSafe, targetX, targetY);
+      }
+
+      // Last resort: random direction
+      return DIRECTIONS[random.nextInt(DIRECTIONS.length)];
     } catch (Exception e) {
       logger.log(Level.SEVERE, "Error in chooseBestDirection", e);
       return DIRECTIONS[random.nextInt(DIRECTIONS.length)];
     }
   }
 
-  private String chooseAlternativeDirection(
-    String agName,
-    int targetX,
-    int targetY
-  ) {
-    try {
-      Map<String, Double> risks = evaluateRisks(agName, targetX, targetY);
-      List<String> safeDirections = new ArrayList<>();
-
-      for (Map.Entry<String, Double> entry : risks.entrySet()) {
-        if (entry.getValue() < 1000.0) {
-          safeDirections.add(entry.getKey());
-        }
-      }
-
-      if (safeDirections.isEmpty()) {
-        return DIRECTIONS[random.nextInt(DIRECTIONS.length)];
-      }
-
-      // If we have a target but it's not close, prefer general direction
-      if (targetX != 0 || targetY != 0) {
-        if (Math.abs(targetX) > Math.abs(targetY)) {
-          String preferredDir = targetX > 0 ? "e" : "w";
-          if (safeDirections.contains(preferredDir)) return preferredDir;
-        } else {
-          String preferredDir = targetY > 0 ? "s" : "n";
-          if (safeDirections.contains(preferredDir)) return preferredDir;
-        }
-      }
-
-      // If no target, use zone-based exploration
-      return handleZoneExploration(agName, safeDirections);
-    } catch (Exception e) {
-      logger.log(Level.SEVERE, "Error in chooseAlternativeDirection", e);
-      return DIRECTIONS[random.nextInt(DIRECTIONS.length)];
-    }
+  private static class DirectionInfo {
+    final List<String> safeTowardsTarget = new ArrayList<>(4);
+    final List<String> allSafe = new ArrayList<>(4);
   }
 
-  private String handleZoneExploration(
-    String agName,
-    List<String> safeDirections
-  ) {
-    Point zone = agentZones.computeIfAbsent(agName, k -> new Point(0, 0));
-    int steps = zoneSteps.computeIfAbsent(agName, k -> 0);
-
-    if (steps > STEPS_BEFORE_ZONE_CHANGE) {
-      zone.x += (random.nextBoolean() ? ZONE_SIZE : -ZONE_SIZE);
-      zone.y += (random.nextBoolean() ? ZONE_SIZE : -ZONE_SIZE);
-      zoneSteps.put(agName, 0);
-    } else {
-      zoneSteps.put(agName, steps + 1);
-    }
-
-    String zoneDir = getDirectionTowardsZone(agName, zone);
-    if (safeDirections.contains(zoneDir)) {
-      return zoneDir;
-    }
-
-    return safeDirections.get(random.nextInt(safeDirections.size()));
-  }
-
-  private String checkSafeDirection(String agName, String preferredDir)
-    throws Exception {
-    // Check if preferred direction is safe
-    Map<String, Double> risks = evaluateRisks(agName, 0, 0);
-    if (risks.get(preferredDir) < 1000.0) {
-      return preferredDir;
-    }
-
-    // If not safe, return null to fall back to other movement strategies
-    return null;
-  }
-
-  private String getDirectionTowardsZone(String agName, Point zone) {
-    try {
-      // Get current position
-      Map<String, Collection<Percept>> percepts = ei.getAllPercepts(agName);
-      int currentX = 0, currentY = 0;
-
-      for (Collection<Percept> perceptList : percepts.values()) {
-        for (Percept p : perceptList) {
-          if (p.getName().equals("position")) {
-            Parameter[] params = p.getParameters().toArray(new Parameter[0]);
-            currentX = ((Numeral) params[0]).getValue().intValue();
-            currentY = ((Numeral) params[1]).getValue().intValue();
-            break;
-          }
-        }
-      }
-
-      // Calculate direction towards zone center
-      int dx = zone.x - currentX;
-      int dy = zone.y - currentY;
-
-      if (Math.abs(dx) > Math.abs(dy)) {
-        return dx > 0 ? "e" : "w";
-      } else {
-        return dy > 0 ? "s" : "n";
-      }
-    } catch (Exception e) {
-      logger.warning("Could not get position, using random direction");
-      return DIRECTIONS[random.nextInt(DIRECTIONS.length)];
-    }
-  }
-
-  private Map<String, Double> evaluateRisks(
+  private DirectionInfo analyzeDirections(
     String agName,
     int targetX,
     int targetY
   )
     throws Exception {
-    // Initialize risks
-    Map<String, Double> risks = new HashMap<>();
-    risks.put("n", 1.0);
-    risks.put("s", 1.0);
-    risks.put("e", 1.0);
-    risks.put("w", 1.0);
+    DirectionInfo info = new DirectionInfo();
+    Map<String, Boolean> obstacles = getImmediateObstacles(agName);
 
-    // Check for obstacles and other agents
+    // O(1) operation as we only check 4 directions
+    for (String dir : DIRECTIONS) {
+      if (!obstacles.getOrDefault(dir, false)) {
+        info.allSafe.add(dir);
+        if (isTowardsTarget(dir, targetX, targetY)) {
+          info.safeTowardsTarget.add(dir);
+        }
+      }
+    }
+
+    return info;
+  }
+
+  private Map<String, Boolean> getImmediateObstacles(String agName)
+    throws Exception {
+    Map<String, Boolean> obstacles = new HashMap<>(4);
     Map<String, Collection<Percept>> percepts = ei.getAllPercepts(agName);
+
     for (Collection<Percept> perceptList : percepts.values()) {
       for (Percept p : perceptList) {
         if (p.getName().equals("thing")) {
@@ -330,106 +305,370 @@ public class MI6Model {
           int y = ((Numeral) params[1]).getValue().intValue();
           String type = ((Identifier) params[2]).getValue();
 
-          // Mark directions with obstacles as very high risk
           if (type.equals("obstacle") || type.equals("entity")) {
-            if (x == 0 && y == -1) risks.put("n", 1000.0);
-            if (x == 0 && y == 1) risks.put("s", 1000.0);
-            if (x == 1 && y == 0) risks.put("e", 1000.0);
-            if (x == -1 && y == 0) risks.put("w", 1000.0);
+            if (x == 0 && y == -1) obstacles.put("n", true);
+            if (x == 0 && y == 1) obstacles.put("s", true);
+            if (x == 1 && y == 0) obstacles.put("e", true);
+            if (x == -1 && y == 0) obstacles.put("w", true);
           }
         }
       }
     }
-
-    // Adjust risks based on target direction
-    if (targetX > 0) risks.put("e", Math.min(risks.get("e"), 0.5));
-    if (targetX < 0) risks.put("w", Math.min(risks.get("w"), 0.5));
-    if (targetY > 0) risks.put("s", Math.min(risks.get("s"), 0.5));
-    if (targetY < 0) risks.put("n", Math.min(risks.get("n"), 0.5));
-
-    return risks;
+    return obstacles;
   }
 
-  private Point getCurrentPosition(String agName) throws Exception {
-    Map<String, Collection<Percept>> percepts = ei.getAllPercepts(agName);
-    for (Collection<Percept> perceptList : percepts.values()) {
-      for (Percept p : perceptList) {
-        if (p.getName().equals("position")) {
-          Parameter[] params = p.getParameters().toArray(new Parameter[0]);
-          return new Point(
-            ((Numeral) params[0]).getValue().intValue(),
-            ((Numeral) params[1]).getValue().intValue()
-          );
-        }
+  private boolean isTowardsTarget(String direction, int targetX, int targetY) {
+    return (
+      (direction.equals("e") && targetX > 0) ||
+      (direction.equals("w") && targetX < 0) ||
+      (direction.equals("s") && targetY > 0) ||
+      (direction.equals("n") && targetY < 0)
+    );
+  }
+
+  private String getBestSafeDirection(
+    List<String> safeDirections,
+    int targetX,
+    int targetY
+  ) {
+    // Prefer directions that at least move on correct axis
+    for (String dir : safeDirections) {
+      if (
+        (
+          Math.abs(targetX) > Math.abs(targetY) &&
+          (dir.equals("e") && targetX > 0 || dir.equals("w") && targetX < 0)
+        ) ||
+        (
+          Math.abs(targetY) >= Math.abs(targetX) &&
+          (dir.equals("s") && targetY > 0 || dir.equals("n") && targetY < 0)
+        )
+      ) {
+        return dir;
       }
     }
-    throw new Exception("Position not found");
+    return safeDirections.get(random.nextInt(safeDirections.size()));
   }
 
-  private String handleStuckAgent(String agName, String lastFailure)
+  private boolean isAlignedAndClear(String agName, int targetX, int targetY)
     throws Exception {
-    Map<String, Double> risks = evaluateRisks(agName, 0, 0);
-    List<String> safeDirections = new ArrayList<>();
+    if ((targetX == 0 || targetY == 0) && (targetX != 0 || targetY != 0)) {
+      String dir = getAlignedDirection(targetX, targetY);
+      Map<String, Boolean> obstacles = getImmediateObstacles(agName);
+      return !obstacles.getOrDefault(dir, false);
+    }
+    return false;
+  }
 
-    for (Map.Entry<String, Double> entry : risks.entrySet()) {
-      if (entry.getValue() < 1000.0) {
-        safeDirections.add(entry.getKey());
+  private String getAlignedDirection(int targetX, int targetY) {
+    if (targetX == 0) {
+      return targetY < 0 ? "n" : "s";
+    }
+    return targetX < 0 ? "w" : "e";
+  }
+
+  private Point getCurrentPosition(String agName) {
+    try {
+      Map<String, Collection<Percept>> percepts = ei.getAllPercepts(agName);
+      if (percepts != null) {
+        for (Collection<Percept> perceptList : percepts.values()) {
+          for (Percept p : perceptList) {
+            if (p.getName().equals("position")) {
+              Parameter[] params = p.getParameters().toArray(new Parameter[0]);
+              int x = ((Numeral) params[0]).getValue().intValue();
+              int y = ((Numeral) params[1]).getValue().intValue();
+              return new Point(x, y);
+            }
+          }
+        }
+      }
+
+      // If we can't get position, use last known position or default
+      MovementHistory history = agentMovement.get(agName);
+      if (history != null && history.lastPosition != null) {
+        return history.lastPosition;
+      }
+
+      // If all else fails, return origin
+      return new Point(0, 0);
+    } catch (Exception e) {
+      logger.fine(
+        "Could not get position for agent " + agName + ", using default"
+      );
+      return new Point(0, 0);
+    }
+  }
+
+  private String handleStuckAgent(String agName, String lastFailure) {
+    try {
+      MovementHistory history = agentMovement.get(agName);
+      if (history == null) return null;
+
+      // Get current safe directions
+      DirectionInfo dirInfo = analyzeDirections(agName, 0, 0);
+      List<String> safeDirections = new ArrayList<>(dirInfo.allSafe);
+
+      // Remove known boundary directions
+      safeDirections.removeAll(history.boundaryDirections);
+
+      // If we've been trying to escape boundary too many times, force a perpendicular move
+      if (history.boundaryEscapeAttempts >= BOUNDARY_ESCAPE_ATTEMPTS) {
+        String escapeDir = forceBoundaryEscape(history, safeDirections);
+        if (escapeDir != null) {
+          history.clearBoundaryAttempts();
+          return escapeDir;
+        }
+      }
+
+      // Sometimes choose random direction to break patterns
+      if (random.nextDouble() < RANDOM_ESCAPE_PROBABILITY) {
+        if (!safeDirections.isEmpty()) {
+          return safeDirections.get(random.nextInt(safeDirections.size()));
+        }
+      }
+
+      // Handle specific failure types
+      if (FAILED_FORBIDDEN.equals(lastFailure)) {
+        history.recordBoundary(getLastAttemptedDirection(agName));
+        String oppositeDir = OPPOSITE_DIRECTIONS.get(
+          getLastAttemptedDirection(agName)
+        );
+        if (safeDirections.contains(oppositeDir)) {
+          return oppositeDir;
+        }
+      }
+
+      // If still stuck, try perpendicular movement
+      if (history.stuckCount > STUCK_THRESHOLD) {
+        String perpDir = getPerpendicularEscapeDirection(
+          history,
+          safeDirections
+        );
+        if (perpDir != null) return perpDir;
+      }
+
+      // Choose least failed direction that's not a boundary
+      return safeDirections
+        .stream()
+        .filter(dir -> !history.boundaryDirections.contains(dir))
+        .min(
+          Comparator.comparingInt(
+            dir -> history.directionFailures.getOrDefault(dir, 0)
+          )
+        )
+        .orElse(getRandomSafeDirection(safeDirections));
+    } catch (Exception e) {
+      logger.log(Level.SEVERE, "Error in handleStuckAgent", e);
+      return null;
+    }
+  }
+
+  private String forceBoundaryEscape(
+    MovementHistory history,
+    List<String> safeDirections
+  ) {
+    // Get the main boundary direction (most failed)
+    String mainBoundary = history
+      .boundaryDirections.stream()
+      .max(
+        Comparator.comparingInt(
+          dir -> history.directionFailures.getOrDefault(dir, 0)
+        )
+      )
+      .orElse(null);
+
+    if (mainBoundary != null) {
+      // Get perpendicular directions
+      List<String> perpDirs = getPerpendicularDirections(mainBoundary);
+      perpDirs.retainAll(safeDirections);
+
+      if (!perpDirs.isEmpty()) {
+        return perpDirs.get(random.nextInt(perpDirs.size()));
       }
     }
+    return null;
+  }
 
-    if (!safeDirections.isEmpty()) {
-      // If we hit a boundary (failed_forbidden), prefer moving away from it
-      if ("failed_forbidden".equals(lastFailure)) {
-        String[] opposites = { "s", "n", "w", "e" };
-        Map<String, String> oppositeDir = new HashMap<>();
-        for (int i = 0; i < DIRECTIONS.length; i++) {
-          oppositeDir.put(DIRECTIONS[i], opposites[i]);
-        }
+  private String getPerpendicularEscapeDirection(
+    MovementHistory history,
+    List<String> safeDirections
+  ) {
+    // Get the most recent failed direction
+    String lastDir = history
+      .directionFailures.entrySet()
+      .stream()
+      .max(Map.Entry.comparingByValue())
+      .map(Map.Entry::getKey)
+      .orElse(null);
 
-        // Try to move in the opposite direction of the boundary
-        String opposite = oppositeDir.get(getLastAttemptedDirection(agName));
-        if (safeDirections.contains(opposite)) {
-          return opposite;
-        }
+    if (lastDir != null) {
+      List<String> perpDirs = getPerpendicularDirections(lastDir);
+      perpDirs.retainAll(safeDirections);
+      if (!perpDirs.isEmpty()) {
+        return perpDirs.get(random.nextInt(perpDirs.size()));
       }
-
-      // If we're blocked by an obstacle/agent (failed_path), try perpendicular directions
-      if ("failed_path".equals(lastFailure)) {
-        String lastDir = getLastAttemptedDirection(agName);
-        if ("n".equals(lastDir) || "s".equals(lastDir)) {
-          if (safeDirections.contains("e")) return "e";
-          if (safeDirections.contains("w")) return "w";
-        } else {
-          if (safeDirections.contains("n")) return "n";
-          if (safeDirections.contains("s")) return "s";
-        }
-      }
-
-      // If all else fails, pick a random safe direction
-      return safeDirections.get(random.nextInt(safeDirections.size()));
     }
+    return null;
+  }
 
-    return null; // Let the main logic handle it if we couldn't find a solution
+  private String getRandomSafeDirection(List<String> safeDirections) {
+    if (safeDirections.isEmpty()) {
+      return DIRECTIONS[random.nextInt(DIRECTIONS.length)];
+    }
+    return safeDirections.get(random.nextInt(safeDirections.size()));
   }
 
   private String getLastAttemptedDirection(String agName) {
-    // Get the movement history for this agent
-    MovementHistory history = agentMovement.get(agName);
-    if (history != null && history.lastFailure != null) {
-      // If we have a history and last failure, return the last direction
-      Point currentPos = history.lastPosition;
-      try {
-        Point newPos = getCurrentPosition(agName);
-        // Compare positions to determine attempted direction
-        if (newPos.x > currentPos.x) return "e";
-        if (newPos.x < currentPos.x) return "w";
-        if (newPos.y > currentPos.y) return "s";
-        if (newPos.y < currentPos.y) return "n";
-      } catch (Exception e) {
-        logger.warning("Could not determine last direction");
+    // Implement the logic to get the last attempted direction
+    // This is a placeholder and should be replaced with the actual implementation
+    return "n"; // Placeholder return, actual implementation needed
+  }
+
+  private String handleZoneExploration(
+    String agName,
+    List<String> safeDirections
+  ) {
+    try {
+      Point currentPos = getCurrentPosition(agName);
+      Zone currentZone = agentZones.computeIfAbsent(
+        agName,
+        k -> new Zone(0, 0)
+      );
+      currentZone.recordExploration(currentPos);
+
+      // Check if we should change zones
+      boolean shouldChangeZone = shouldChangeZone(currentZone, currentPos);
+
+      if (shouldChangeZone) {
+        Zone newZone = calculateNextZone(agName, currentPos);
+        agentZones.put(agName, newZone);
+        currentZone = newZone;
+      }
+
+      // Get direction towards zone center
+      String zoneDir = getOptimalZoneDirection(
+        currentPos,
+        currentZone,
+        safeDirections
+      );
+      if (zoneDir != null && safeDirections.contains(zoneDir)) {
+        return zoneDir;
+      }
+
+      // If we can't move towards zone center, use safe random direction
+      return safeDirections.get(random.nextInt(safeDirections.size()));
+    } catch (Exception e) {
+      logger.log(Level.FINE, "Error in handleZoneExploration", e);
+      return safeDirections.get(random.nextInt(safeDirections.size()));
+    }
+  }
+
+  private boolean shouldChangeZone(Zone zone, Point currentPos) {
+    return (
+      zone.stepsInZone >= STEPS_BEFORE_ZONE_CHANGE &&
+      (zone.isFullyExplored() || random.nextDouble() < ZONE_CHANGE_PROBABILITY)
+    );
+  }
+
+  private Zone calculateNextZone(String agName, Point currentPos) {
+    // Get all previous zones for this agent
+    Set<Point> previousZones = agentZones
+      .values()
+      .stream()
+      .map(z -> new Point(z.x, z.y))
+      .collect(Collectors.toSet());
+
+    // Calculate potential new zones
+    List<Zone> potentialZones = new ArrayList<>();
+    int[] offsets = { -ZONE_SIZE, 0, ZONE_SIZE };
+
+    for (int dx : offsets) {
+      for (int dy : offsets) {
+        if (dx == 0 && dy == 0) continue;
+
+        int newX = currentPos.x + dx;
+        int newY = currentPos.y + dy;
+
+        // Check if within bounds and not too far from center
+        if (
+          Math.abs(newX) <= MAX_ZONE_DISTANCE &&
+          Math.abs(newY) <= MAX_ZONE_DISTANCE &&
+          !previousZones.contains(new Point(newX, newY))
+        ) {
+          potentialZones.add(new Zone(newX, newY));
+        }
       }
     }
-    // Default to north if we can't determine direction
-    return "n";
+
+    // If no valid zones found, reset to a random direction within bounds
+    if (potentialZones.isEmpty()) {
+      int x = random.nextInt(MAX_ZONE_DISTANCE * 2) - MAX_ZONE_DISTANCE;
+      int y = random.nextInt(MAX_ZONE_DISTANCE * 2) - MAX_ZONE_DISTANCE;
+      return new Zone(x, y);
+    }
+
+    // Choose random zone from potential zones
+    return potentialZones.get(random.nextInt(potentialZones.size()));
+  }
+
+  private String getOptimalZoneDirection(
+    Point currentPos,
+    Zone zone,
+    List<String> safeDirections
+  ) {
+    int dx = zone.x - currentPos.x;
+    int dy = zone.y - currentPos.y;
+
+    // If we're in the zone, explore within it
+    if (Math.abs(dx) < ZONE_SIZE / 2 && Math.abs(dy) < ZONE_SIZE / 2) {
+      return exploreWithinZone(zone, safeDirections);
+    }
+
+    // Move towards zone center
+    if (Math.abs(dx) > Math.abs(dy)) {
+      return dx > 0 ? "e" : "w";
+    } else {
+      return dy > 0 ? "s" : "n";
+    }
+  }
+
+  private String exploreWithinZone(Zone zone, List<String> safeDirections) {
+    // Prefer unexplored directions within the zone
+    List<String> unexploredDirs = safeDirections
+      .stream()
+      .filter(dir -> !zone.exploredPoints.contains(getPointInDirection(dir)))
+      .collect(Collectors.toList());
+
+    if (!unexploredDirs.isEmpty()) {
+      return unexploredDirs.get(random.nextInt(unexploredDirs.size()));
+    }
+
+    return null; // Let caller handle fallback
+  }
+
+  private Point getPointInDirection(String direction) {
+    switch (direction) {
+      case "n":
+        return new Point(0, -1);
+      case "s":
+        return new Point(0, 1);
+      case "e":
+        return new Point(1, 0);
+      case "w":
+        return new Point(-1, 0);
+      default:
+        return new Point(0, 0);
+    }
+  }
+
+  private List<String> getPerpendicularDirections(String direction) {
+    List<String> perpDirs = new ArrayList<>(2);
+    if ("n".equals(direction) || "s".equals(direction)) {
+      perpDirs.add("e");
+      perpDirs.add("w");
+    } else {
+      perpDirs.add("n");
+      perpDirs.add("s");
+    }
+    return perpDirs;
   }
 }
