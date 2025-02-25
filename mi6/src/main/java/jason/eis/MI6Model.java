@@ -629,7 +629,8 @@ public class MI6Model {
     Map<String, Collection<Percept>> percepts = ei.getAllPercepts(agName);
     if (percepts != null) {
       for (Collection<Percept> perceptList : percepts.values()) {
-        localMap.scanPerceptions(perceptList);
+        // Update the local map with all percepts
+        updateLocalMapWithPercepts(agName, perceptList);
 
         for (Percept p : perceptList) {
           if ("position".equals(p.getName())) {
@@ -639,6 +640,8 @@ public class MI6Model {
                 ((Numeral) params[0]).getValue().intValue(),
                 ((Numeral) params[1]).getValue().intValue()
               );
+            // Update the agent's position in the local map
+            localMap.updatePosition(position);
           }
         }
       }
@@ -650,6 +653,47 @@ public class MI6Model {
     );
     perceptCache.put(agName, newCache);
     return newCache;
+  }
+
+  private void updateLocalMapWithPercepts(
+    String agName,
+    Collection<Percept> percepts
+  ) {
+    LocalMap map = getOrCreateLocalMap(agName);
+    for (Percept p : percepts) {
+      if ("thing".equals(p.getName())) {
+        Parameter[] params = p.getParameters().toArray(new Parameter[0]);
+        int x = ((Numeral) params[0]).getValue().intValue();
+        int y = ((Numeral) params[1]).getValue().intValue();
+        String type = ((Identifier) params[2]).getValue();
+        String details = params.length > 3
+          ? ((Identifier) params[3]).getValue()
+          : null;
+
+        Point relativePos = new Point(x, y);
+
+        switch (type) {
+          case "dispenser":
+            if (details != null) { // b0 or b1
+              map.addDispenser(relativePos, details);
+            }
+            break;
+          case "block":
+            if (details != null) { // b0 or b1
+              map.addBlock(relativePos, details);
+            }
+            break;
+          case "obstacle":
+            map.addObstacle(relativePos);
+            break;
+        }
+      } else if ("goal".equals(p.getName())) {
+        Parameter[] params = p.getParameters().toArray(new Parameter[0]);
+        int x = ((Numeral) params[0]).getValue().intValue();
+        int y = ((Numeral) params[1]).getValue().intValue();
+        map.addGoal(new Point(x, y));
+      }
+    }
   }
 
   public void addPercept(String agName, Literal percept) {
@@ -784,5 +828,16 @@ public class MI6Model {
 
   public List<String> getPathToNearestDispenser(String agName) {
     return agentPaths.getOrDefault(agName, Collections.emptyList());
+  }
+
+  public void updateLocalMapWithPercepts(
+    String agName,
+    Collection<Percept> percepts
+  ) {
+    try {
+      updateLocalMapWithPercepts(agName, percepts);
+    } catch (Exception e) {
+      logger.log(Level.WARNING, "Error updating local map", e);
+    }
   }
 }

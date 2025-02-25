@@ -95,6 +95,10 @@ public class EISAdapter extends Environment implements AgentListener {
             "entity",
             ASSyntax.createAtom(entity)
           );
+
+          // Update the model's local map with the new percepts
+          model.updateLocalMapWithPercepts(agName, perMap.get(entity));
+
           for (Percept p : perMap.get(entity)) {
             try {
               percepts.add(perceptToLiteral(p).addAnnots(strcEnt));
