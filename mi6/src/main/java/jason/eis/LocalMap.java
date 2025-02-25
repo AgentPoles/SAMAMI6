@@ -36,6 +36,10 @@ public class LocalMap {
   private static final int PATH_CACHE_SIZE = 100;
   private static final long PATH_CACHE_DURATION = 5000; // 5 seconds
 
+  // Add movement history tracking (only used when DEBUG is true)
+  private final List<String> movementHistory;
+  private static final int MAX_MOVEMENT_HISTORY = 50; // Keep last 50 moves
+
   public static boolean DEBUG = true; // Default to false
 
   // Inner class to represent entities with timestamp
@@ -95,6 +99,7 @@ public class LocalMap {
     this.goals = Collections.newSetFromMap(new ConcurrentHashMap<>());
     this.entityMap = new ConcurrentHashMap<>();
     this.pathCache = new ConcurrentHashMap<>();
+    this.movementHistory = new ArrayList<>();
   }
 
   public Point getCurrentPosition() {
@@ -127,7 +132,6 @@ public class LocalMap {
   }
 
   public void updatePositionFromMovement(String direction) {
-    // Update position based on movement direction
     switch (direction.toLowerCase()) {
       case "n":
         currentPosition = new Point(currentPosition.x, currentPosition.y - 1);
@@ -142,18 +146,40 @@ public class LocalMap {
         currentPosition = new Point(currentPosition.x - 1, currentPosition.y);
         break;
     }
+
     if (DEBUG) {
+      // Add to movement history
+      String moveEntry = String.format(
+        "Move %s: (%d,%d)",
+        direction,
+        currentPosition.x,
+        currentPosition.y
+      );
+      movementHistory.add(moveEntry);
+
+      // Keep history size manageable
+      if (movementHistory.size() > MAX_MOVEMENT_HISTORY) {
+        movementHistory.remove(0);
+      }
+
       logger.info(
         "Updated position to " + currentPosition + " after moving " + direction
       );
     }
   }
 
-  // Convert a relative position from percepts to absolute position
+  /**
+   * Converts relative coordinates to absolute coordinates
+   * Handles the coordinate system where:
+   * - North is -y
+   * - South is +y
+   * - East is +x
+   * - West is -x
+   */
   private Point toAbsolutePosition(Point relativePos) {
     return new Point(
-      currentPosition.x + relativePos.x,
-      currentPosition.y + relativePos.y
+      currentPosition.x + relativePos.x, // X: positive is east
+      currentPosition.y + relativePos.y // Y: positive is south
     );
   }
 
@@ -481,10 +507,10 @@ public class LocalMap {
   }
 
   private enum Direction {
-    NORTH(0, -1),
-    SOUTH(0, 1),
-    EAST(1, 0),
-    WEST(-1, 0);
+    NORTH(0, -1), // Correct: north decrements y
+    SOUTH(0, 1), // Correct: south increments y
+    EAST(1, 0), // Correct: east increments x
+    WEST(-1, 0); // Correct: west decrements x
 
     final int dx;
     final int dy;
@@ -640,6 +666,17 @@ public class LocalMap {
           currentPosition.y
         )
       );
+    }
+
+    // Add movement history if in debug mode
+    if (DEBUG && !movementHistory.isEmpty()) {
+      sb
+        .append("\nMovement History (last ")
+        .append(MAX_MOVEMENT_HISTORY)
+        .append(" moves):\n");
+      for (String move : movementHistory) {
+        sb.append("  ").append(move).append("\n");
+      }
     }
 
     return sb.toString();
