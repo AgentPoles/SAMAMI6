@@ -1,7 +1,6 @@
 package jason.eis;
 
 import eis.iilang.*;
-import java.awt.Point;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
@@ -17,8 +16,8 @@ public class LocalMap {
   private static final int VIEW_DISTANCE = 5; // Maximum view distance
 
   // Position tracking
-  private Point absolutePosition;
-  private Point lastRelativePosition;
+  private Point currentPosition; // Current absolute position
+  private Point lastRelativePosition; // Last relative position from percepts
 
   // Separate mappings for specific types and combined
   private final Map<String, Set<MapEntity>> dispensersB0;
@@ -36,6 +35,8 @@ public class LocalMap {
   private final Map<Point, List<String>> pathCache;
   private static final int PATH_CACHE_SIZE = 100;
   private static final long PATH_CACHE_DURATION = 5000; // 5 seconds
+
+  public static boolean DEBUG = true; // Default to false
 
   // Inner class to represent entities with timestamp
   private static class MapEntity {
@@ -78,7 +79,8 @@ public class LocalMap {
   }
 
   public LocalMap() {
-    this.absolutePosition = new Point(0, 0);
+    // Initialize position tracking
+    this.currentPosition = new Point(0, 0);
     this.lastRelativePosition = new Point(0, 0);
 
     // Initialize type-specific collections
@@ -95,38 +97,63 @@ public class LocalMap {
     this.pathCache = new ConcurrentHashMap<>();
   }
 
-  /**
-   * Updates the absolute position based on relative movement
-   */
-  public void updatePosition(Point newRelativePosition) {
+  public Point getCurrentPosition() {
+    return new Point(currentPosition.x, currentPosition.y);
+  }
+
+  public void updatePosition(Point newPosition) {
+    // If this is the first position update
+    if (lastRelativePosition == null) {
+      lastRelativePosition = new Point(0, 0);
+      currentPosition = new Point(0, 0);
+    }
+
     // Calculate the difference in position
-    int dx = newRelativePosition.x - lastRelativePosition.x;
-    int dy = newRelativePosition.y - lastRelativePosition.y;
+    int dx = newPosition.x - lastRelativePosition.x;
+    int dy = newPosition.y - lastRelativePosition.y;
 
     // Update absolute position
-    absolutePosition.translate(dx, dy);
-    lastRelativePosition = newRelativePosition;
+    currentPosition = new Point(currentPosition.x + dx, currentPosition.y + dy);
+    lastRelativePosition = newPosition;
 
-    // Clear stale cache entries
-    clearStaleCache();
-
-    logger.fine("Updated position to " + absolutePosition);
+    if (DEBUG) {
+      logger.info(
+        "Updated position to " +
+        currentPosition +
+        " from percept " +
+        newPosition
+      );
+    }
   }
 
-  /**
-   * Converts relative coordinates to absolute coordinates
-   */
-  private Point toAbsolute(int relX, int relY) {
-    return new Point(absolutePosition.x + relX, absolutePosition.y + relY);
+  public void updatePositionFromMovement(String direction) {
+    // Update position based on movement direction
+    switch (direction.toLowerCase()) {
+      case "n":
+        currentPosition = new Point(currentPosition.x, currentPosition.y - 1);
+        break;
+      case "s":
+        currentPosition = new Point(currentPosition.x, currentPosition.y + 1);
+        break;
+      case "e":
+        currentPosition = new Point(currentPosition.x + 1, currentPosition.y);
+        break;
+      case "w":
+        currentPosition = new Point(currentPosition.x - 1, currentPosition.y);
+        break;
+    }
+    if (DEBUG) {
+      logger.info(
+        "Updated position to " + currentPosition + " after moving " + direction
+      );
+    }
   }
 
-  /**
-   * Converts absolute coordinates to relative coordinates
-   */
-  private Point toRelative(Point absolute) {
+  // Convert a relative position from percepts to absolute position
+  private Point toAbsolutePosition(Point relativePos) {
     return new Point(
-      absolute.x - absolutePosition.x,
-      absolute.y - absolutePosition.y
+      currentPosition.x + relativePos.x,
+      currentPosition.y + relativePos.y
     );
   }
 
@@ -157,7 +184,7 @@ public class LocalMap {
     int relY = ((Numeral) params[1]).getValue().intValue();
     String type = ((Identifier) params[2]).getValue();
 
-    Point absPos = toAbsolute(relX, relY);
+    Point absPos = toAbsolutePosition(new Point(relX, relY));
     String subType = ((Identifier) params[3]).getValue();
     MapEntity entity = new MapEntity(absPos, type, subType);
 
@@ -204,11 +231,15 @@ public class LocalMap {
       .add(entity);
   }
 
+  private void updateEntitySet(Set<MapEntity> set, MapEntity entity) {
+    set.add(entity);
+  }
+
   /**
    * Clears entities that should be in view but weren't observed
    */
   private void clearOldEntitiesInView() {
-    Point pos = absolutePosition;
+    Point pos = currentPosition;
     for (int x = -VIEW_DISTANCE; x <= VIEW_DISTANCE; x++) {
       for (int y = -VIEW_DISTANCE; y <= VIEW_DISTANCE; y++) {
         Point checkPos = new Point(pos.x + x, pos.y + y);
@@ -286,7 +317,7 @@ public class LocalMap {
       for (MapEntity entity : entities) {
         if (entity.isStale()) continue;
 
-        double distance = getDistance(absolutePosition, entity.position);
+        double distance = getDistance(currentPosition, entity.position);
         if (distance < minDistance) {
           minDistance = distance;
           nearest.clear();
@@ -312,7 +343,7 @@ public class LocalMap {
    */
   public List<String> findPathTo(Point target) {
     // Check cache first
-    String cacheKey = absolutePosition + "->" + target;
+    String cacheKey = currentPosition + "->" + target;
     List<String> cachedPath = pathCache.get(target);
     if (cachedPath != null) {
       return new ArrayList<>(cachedPath);
@@ -340,13 +371,13 @@ public class LocalMap {
     Map<Point, Node> nodeMap = new HashMap<>();
 
     Node start = new Node(
-      absolutePosition,
+      currentPosition,
       null,
       0,
-      getDistance(absolutePosition, target)
+      getDistance(currentPosition, target)
     );
     openSet.add(start);
-    nodeMap.put(absolutePosition, start);
+    nodeMap.put(currentPosition, start);
 
     while (!openSet.isEmpty()) {
       Node current = openSet.poll();
@@ -466,7 +497,7 @@ public class LocalMap {
 
   // Getters for map information
   public Point getAbsolutePosition() {
-    return new Point(absolutePosition);
+    return new Point(currentPosition.x, currentPosition.y);
   }
 
   public Set<Point> getObstacles() {
@@ -531,5 +562,124 @@ public class LocalMap {
         )
     );
     return result;
+  }
+
+  @Override
+  public String toString() {
+    StringBuilder sb = new StringBuilder();
+    sb.append("LocalMap:\n");
+
+    // Dispensers
+    sb.append("Dispensers:\n");
+    for (Map.Entry<String, Set<MapEntity>> entry : dispensersB0.entrySet()) {
+      for (MapEntity entity : entry.getValue()) {
+        sb.append(
+          String.format(
+            "  Location: (%d,%d), Type: b0\n",
+            entity.position.x,
+            entity.position.y
+          )
+        );
+      }
+    }
+    for (Map.Entry<String, Set<MapEntity>> entry : dispensersB1.entrySet()) {
+      for (MapEntity entity : entry.getValue()) {
+        sb.append(
+          String.format(
+            "  Location: (%d,%d), Type: b1\n",
+            entity.position.x,
+            entity.position.y
+          )
+        );
+      }
+    }
+
+    // Blocks
+    sb.append("Blocks:\n");
+    for (Map.Entry<String, Set<MapEntity>> entry : blocksB0.entrySet()) {
+      for (MapEntity entity : entry.getValue()) {
+        sb.append(
+          String.format(
+            "  Location: (%d,%d), Type: b0\n",
+            entity.position.x,
+            entity.position.y
+          )
+        );
+      }
+    }
+    for (Map.Entry<String, Set<MapEntity>> entry : blocksB1.entrySet()) {
+      for (MapEntity entity : entry.getValue()) {
+        sb.append(
+          String.format(
+            "  Location: (%d,%d), Type: b1\n",
+            entity.position.x,
+            entity.position.y
+          )
+        );
+      }
+    }
+
+    // Obstacles
+    sb.append("Obstacles:\n");
+    for (MapEntity entity : obstacles) {
+      sb.append(
+        String.format(
+          "  Location: (%d,%d)\n",
+          entity.position.x,
+          entity.position.y
+        )
+      );
+    }
+
+    // Current Position
+    if (currentPosition != null) {
+      sb.append(
+        String.format(
+          "Current Position: (%d,%d)\n",
+          currentPosition.x,
+          currentPosition.y
+        )
+      );
+    }
+
+    return sb.toString();
+  }
+
+  public void addDispenser(Point relativePos, String type) {
+    Point absolutePos = toAbsolutePosition(relativePos);
+    MapEntity entity = new MapEntity(absolutePos, "dispenser", type);
+    if (type.equals("b0")) {
+      updateEntitySet(dispensersB0, entity);
+    } else if (type.equals("b1")) {
+      updateEntitySet(dispensersB1, entity);
+    }
+    updateEntitySet(allDispensers, entity);
+    entityMap.put(absolutePos, entity);
+  }
+
+  public void addBlock(Point relativePos, String type) {
+    Point absolutePos = toAbsolutePosition(relativePos);
+    MapEntity entity = new MapEntity(absolutePos, "block", type);
+    if (type.equals("b0")) {
+      updateEntitySet(blocksB0, entity);
+    } else if (type.equals("b1")) {
+      updateEntitySet(blocksB1, entity);
+    }
+    updateEntitySet(allBlocks, entity);
+    entityMap.put(absolutePos, entity);
+  }
+
+  public void addObstacle(Point relativePos) {
+    Point absolutePos = toAbsolutePosition(relativePos);
+    MapEntity entity = new MapEntity(absolutePos, "obstacle", null);
+    updateEntitySet(obstacles, entity);
+    entityMap.put(absolutePos, entity);
+  }
+
+  public void addGoal(Point relativePos) {
+    Point absolutePos = toAbsolutePosition(relativePos);
+    MapEntity entity = new MapEntity(absolutePos, "goal", null);
+    updateEntitySet(goals, entity);
+    entityMap.put(absolutePos, entity);
   }
 }

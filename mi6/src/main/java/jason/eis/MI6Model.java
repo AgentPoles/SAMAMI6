@@ -3,6 +3,9 @@ package jason.eis;
 import eis.EnvironmentInterfaceStandard;
 import eis.iilang.*;
 import jason.asSyntax.*;
+import jason.eis.Point;
+import jason.eis.movements.PlannedMovement;
+import jason.eis.movements.RandomMovement;
 import jason.environment.Environment;
 import java.util.*;
 import java.util.logging.Level;
@@ -130,12 +133,23 @@ public class MI6Model {
   // Track if an agent is moving towards a dispenser
   private final Map<String, Boolean> movingToDispenser = new HashMap<>();
 
+  // Add new field declarations
+  private final RandomMovement randomMovement;
+  private final PlannedMovement plannedMovement;
+
   private LocalMap getOrCreateLocalMap(String agName) {
     return agentMaps.computeIfAbsent(agName, k -> new LocalMap());
   }
 
   public MI6Model(EnvironmentInterfaceStandard ei) {
     this.ei = ei;
+
+    // Set DEBUG mode
+    LocalMap.DEBUG = true; // Set to true or false as needed
+
+    // Initialize movement classes with agentMaps
+    this.randomMovement = new RandomMovement(agentMaps);
+    this.plannedMovement = new PlannedMovement(agentMaps);
   }
 
   public boolean moveTowards(String agName, String direction) throws Exception {
@@ -144,13 +158,21 @@ public class MI6Model {
         agName,
         new Action("move", new Identifier(direction.toLowerCase()))
       );
+      // Update the local map position after successful movement
+      LocalMap map = getOrCreateLocalMap(agName);
+      map.updatePositionFromMovement(direction);
+      randomMovement.recordSuccess(agName);
       return true;
     } catch (Exception e) {
-      return handleMoveFailure(agName, e);
+      return handleMoveFailure(agName, direction, e);
     }
   }
 
-  private boolean handleMoveFailure(String agName, Exception e)
+  private boolean handleMoveFailure(
+    String agName,
+    String direction,
+    Exception e
+  )
     throws Exception {
     String errorMsg = e != null ? e.getMessage() : "Unknown error";
     logger.warning("Move failed for agent " + agName + ": " + errorMsg);
@@ -158,7 +180,7 @@ public class MI6Model {
     // If we have a specific error message, we might want to handle it differently
     if (errorMsg != null && errorMsg.toLowerCase().contains("forbidden")) {
       // Handle forbidden move
-      logger.info("Move was forbidden, trying alternative direction");
+      randomMovement.recordFailure(agName, direction, "failed_forbidden");
       return false;
     }
 
@@ -190,58 +212,10 @@ public class MI6Model {
   }
 
   public String chooseBestDirection(String agName, int targetX, int targetY) {
-    // Check if the agent is already moving towards a dispenser
-    if (Boolean.TRUE.equals(movingToDispenser.get(agName))) {
-      System.out.println(
-        "Agent " +
-        agName +
-        " is moving to a dispenser, skipping direction choice."
-      );
-      return null; // Return null or a special value to indicate no movement should be made
+    if (plannedMovement.isMovingToDispenser(agName)) {
+      return null;
     }
-
-    try {
-      // Fast path: check if we're aligned and path is clear
-      if (isAlignedAndClear(agName, targetX, targetY)) {
-        return getAlignedDirection(targetX, targetY);
-      }
-
-      // Get current position (now with fallback)
-      Point currentPos = getCurrentPosition(agName);
-      MovementHistory history = agentMovement.computeIfAbsent(
-        agName,
-        k -> new MovementHistory()
-      );
-
-      if (currentPos.equals(history.lastPosition)) {
-        if (++history.stuckCount >= STUCK_THRESHOLD) {
-          String escapeDir = handleStuckAgent(agName, history.lastFailure);
-          if (escapeDir != null) return escapeDir;
-        }
-      } else {
-        history.stuckCount = 0;
-        history.lastPosition = currentPos;
-      }
-
-      // Get available directions (O(1) as we only check 4 directions)
-      DirectionInfo dirInfo = analyzeDirections(agName, targetX, targetY);
-
-      // If we have safe directions towards target, use them
-      if (!dirInfo.safeTowardsTarget.isEmpty()) {
-        return dirInfo.safeTowardsTarget.get(0);
-      }
-
-      // If we have any safe directions, use the best available
-      if (!dirInfo.allSafe.isEmpty()) {
-        return getBestSafeDirection(dirInfo.allSafe, targetX, targetY);
-      }
-
-      // Last resort: random direction
-      return DIRECTIONS[random.nextInt(DIRECTIONS.length)];
-    } catch (Exception e) {
-      logger.log(Level.SEVERE, "Error in chooseBestDirection", e);
-      return DIRECTIONS[random.nextInt(DIRECTIONS.length)];
-    }
+    return randomMovement.chooseBestDirection(agName, targetX, targetY);
   }
 
   private static class DirectionInfo {
@@ -629,7 +603,6 @@ public class MI6Model {
     Map<String, Collection<Percept>> percepts = ei.getAllPercepts(agName);
     if (percepts != null) {
       for (Collection<Percept> perceptList : percepts.values()) {
-        // Update the local map with all percepts
         updateLocalMapWithPercepts(agName, perceptList);
 
         for (Percept p : perceptList) {
@@ -640,7 +613,6 @@ public class MI6Model {
                 ((Numeral) params[0]).getValue().intValue(),
                 ((Numeral) params[1]).getValue().intValue()
               );
-            // Update the agent's position in the local map
             localMap.updatePosition(position);
           }
         }
@@ -655,7 +627,7 @@ public class MI6Model {
     return newCache;
   }
 
-  private void updateLocalMapWithPercepts(
+  public void updateLocalMapWithPercepts(
     String agName,
     Collection<Percept> percepts
   ) {
@@ -674,12 +646,12 @@ public class MI6Model {
 
         switch (type) {
           case "dispenser":
-            if (details != null) { // b0 or b1
+            if (details != null) {
               map.addDispenser(relativePos, details);
             }
             break;
           case "block":
-            if (details != null) { // b0 or b1
+            if (details != null) {
               map.addBlock(relativePos, details);
             }
             break;
@@ -694,6 +666,7 @@ public class MI6Model {
         map.addGoal(new Point(x, y));
       }
     }
+    logMapState(agName);
   }
 
   public void addPercept(String agName, Literal percept) {
@@ -761,67 +734,24 @@ public class MI6Model {
   }
 
   public boolean findNearestDispenser(String agName) {
-    // Check if already moving towards a dispenser
-    if (Boolean.TRUE.equals(movingToDispenser.get(agName))) {
-      System.out.println(
-        "Agent " + agName + " is already moving to a dispenser."
-      );
-      return true;
-    }
-
-    LocalMap map = getOrCreateLocalMap(agName);
-
-    List<Point> dispensersB0 = map.findNearestDispenser("b0");
-    List<Point> dispensersB1 = map.findNearestDispenser("b1");
-
-    Point nearest = null;
-    String type = "";
-
-    if (!dispensersB0.isEmpty()) {
-      nearest = dispensersB0.get(0);
-      type = "b0";
-    } else if (!dispensersB1.isEmpty()) {
-      nearest = dispensersB1.get(0);
-      type = "b1";
-    }
-
-    if (nearest != null) {
-      List<String> path = map.findPathTo(nearest);
-      agentPaths.put(agName, path);
-      movingToDispenser.put(agName, true);
-      System.out.println("Path to nearest dispenser: " + path);
-      return true;
-    } else {
-      System.out.println("No dispenser found for agent " + agName);
-      agentPaths.remove(agName);
-      return false;
-    }
+    return plannedMovement.findNearestDispenser(agName);
   }
 
   public boolean moveToNearestDispenser(String agName) {
-    List<String> path = agentPaths.get(agName);
-    if (path == null || path.isEmpty()) {
-      System.out.println("No path available for agent " + agName);
-      movingToDispenser.put(agName, false);
-      return false;
-    }
+    String nextMove = plannedMovement.getNextMove(agName);
+    if (nextMove == null) return false;
 
-    String nextMove = path.remove(0);
     try {
       boolean success = moveTowards(agName, nextMove);
-      if (!success) {
-        System.out.println("Failed to move " + agName + " towards " + nextMove);
-        movingToDispenser.put(agName, false);
-        return false;
+      if (success) {
+        plannedMovement.moveSucceeded(agName);
+      } else {
+        plannedMovement.moveFailed(agName);
       }
-      System.out.println("Agent " + agName + " moved towards " + nextMove);
-      if (path.isEmpty()) {
-        movingToDispenser.put(agName, false); // Reached the destination
-      }
-      return true;
+      return success;
     } catch (Exception e) {
       logger.log(Level.SEVERE, "Error moving agent " + agName, e);
-      movingToDispenser.put(agName, false);
+      plannedMovement.moveFailed(agName);
       return false;
     }
   }
@@ -830,14 +760,18 @@ public class MI6Model {
     return agentPaths.getOrDefault(agName, Collections.emptyList());
   }
 
-  public void updateLocalMapWithPercepts(
-    String agName,
-    Collection<Percept> percepts
-  ) {
+  public void logMapState(String agName) {
+    if (LocalMap.DEBUG) {
+      LocalMap map = getOrCreateLocalMap(agName);
+      logger.info("Map state for agent " + agName + ":\n" + map.toString());
+    }
+  }
+
+  public void processPercepts(String agName, Collection<Percept> percepts) {
     try {
       updateLocalMapWithPercepts(agName, percepts);
     } catch (Exception e) {
-      logger.log(Level.WARNING, "Error updating local map", e);
+      logger.log(Level.WARNING, "Error processing percepts", e);
     }
   }
 }
