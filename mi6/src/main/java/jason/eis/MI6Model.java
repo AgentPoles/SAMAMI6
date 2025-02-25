@@ -100,101 +100,70 @@ public class MI6Model {
     }
   }
 
-  private static class Point {
-    final int x;
-    final int y;
-    final int hashCode;
-
-    Point(int x, int y) {
-      this.x = x;
-      this.y = y;
-      this.hashCode = Objects.hash(x, y);
-    }
-
-    @Override
-    public int hashCode() {
-      return hashCode;
-    }
-
-    @Override
-    public boolean equals(Object o) {
-      if (this == o) return true;
-      if (!(o instanceof Point)) return false;
-      Point p = (Point) o;
-      return x == p.x && y == p.y;
-    }
-  }
-
-  private static class Zone {
-    int x, y;
-    int stepsInZone;
-    long lastVisitTime;
-    Set<Point> exploredPoints;
-
-    Zone(int x, int y) {
-      this.x = x;
-      this.y = y;
-      this.stepsInZone = 0;
-      this.lastVisitTime = System.currentTimeMillis();
-      this.exploredPoints = new HashSet<>();
-    }
-
-    boolean isFullyExplored() {
-      return exploredPoints.size() >= ZONE_SIZE * ZONE_SIZE * 0.7; // 70% explored
-    }
-
-    void recordExploration(Point p) {
-      exploredPoints.add(p);
-      stepsInZone++;
-    }
-
-    void reset() {
-      stepsInZone = 0;
-      lastVisitTime = System.currentTimeMillis();
-      exploredPoints.clear();
-    }
-  }
-
   // Track zones per agent
   private final Map<String, Zone> agentZones = new HashMap<>();
+
+  // In MI6Model.java, add:
+  private final Map<String, LocalMap> agentMaps = new HashMap<>();
+
+  // Add PerceptCache class definition
+  private static class PerceptCache {
+    final Point position;
+    final BitSet obstacles;
+    final long timestamp;
+
+    PerceptCache(Point position, BitSet obstacles) {
+      this.position = position;
+      this.obstacles = obstacles;
+      this.timestamp = System.nanoTime();
+    }
+
+    boolean isValid() {
+      return System.nanoTime() - timestamp < 100_000_000; // 100ms cache
+    }
+  }
+
+  private final Map<String, PerceptCache> perceptCache = new HashMap<>();
+
+  // Store paths for each agent
+  private final Map<String, List<String>> agentPaths = new HashMap<>();
+  // Track if an agent is moving towards a dispenser
+  private final Map<String, Boolean> movingToDispenser = new HashMap<>();
+
+  private LocalMap getOrCreateLocalMap(String agName) {
+    return agentMaps.computeIfAbsent(agName, k -> new LocalMap());
+  }
 
   public MI6Model(EnvironmentInterfaceStandard ei) {
     this.ei = ei;
   }
 
-  public boolean moveTowards(String agName, String direction) {
+  public boolean moveTowards(String agName, String direction) throws Exception {
     try {
-      MovementHistory history = agentMovement.computeIfAbsent(
+      ei.performAction(
         agName,
-        k -> new MovementHistory()
+        new Action("move", new Identifier(direction.toLowerCase()))
       );
-      ei.performAction(agName, new Action("move", new Identifier(direction)));
-      history.recordSuccess();
       return true;
     } catch (Exception e) {
-      handleMoveFailure(agName, direction, e);
-      return false;
+      return handleMoveFailure(agName, e);
     }
   }
 
-  private void handleMoveFailure(String agName, String direction, Exception e) {
-    String message = e.getMessage().toLowerCase();
-    MovementHistory history = agentMovement.get(agName);
+  private boolean handleMoveFailure(String agName, Exception e)
+    throws Exception {
+    String errorMsg = e != null ? e.getMessage() : "Unknown error";
+    logger.warning("Move failed for agent " + agName + ": " + errorMsg);
 
-    if (history != null) {
-      if (message.contains(FAILED_PATH)) {
-        history.recordFailure(direction, FAILED_PATH);
-        logger.fine("Agent " + agName + " blocked in direction " + direction);
-      } else if (message.contains(FAILED_FORBIDDEN)) {
-        history.recordFailure(direction, FAILED_FORBIDDEN);
-        logger.fine(
-          "Agent " + agName + " hit boundary in direction " + direction
-        );
-      } else if (message.contains(FAILED_PARAMETER)) {
-        history.recordFailure(direction, FAILED_PARAMETER);
-        logger.warning("Agent " + agName + " invalid direction: " + direction);
-      }
+    // If we have a specific error message, we might want to handle it differently
+    if (errorMsg != null && errorMsg.toLowerCase().contains("forbidden")) {
+      // Handle forbidden move
+      logger.info("Move was forbidden, trying alternative direction");
+      return false;
     }
+
+    // Re-throw the exception if we can't handle it
+    throw new Exception("Move failed: " + errorMsg);
   }
 
   public boolean requestBlock(String agName, String direction) {
@@ -221,6 +190,16 @@ public class MI6Model {
   }
 
   public String chooseBestDirection(String agName, int targetX, int targetY) {
+    // Check if the agent is already moving towards a dispenser
+    if (Boolean.TRUE.equals(movingToDispenser.get(agName))) {
+      System.out.println(
+        "Agent " +
+        agName +
+        " is moving to a dispenser, skipping direction choice."
+      );
+      return null; // Return null or a special value to indicate no movement should be made
+    }
+
     try {
       // Fast path: check if we're aligned and path is clear
       if (isAlignedAndClear(agName, targetX, targetY)) {
@@ -564,49 +543,31 @@ public class MI6Model {
 
   private boolean shouldChangeZone(Zone zone, Point currentPos) {
     return (
-      zone.stepsInZone >= STEPS_BEFORE_ZONE_CHANGE &&
-      (zone.isFullyExplored() || random.nextDouble() < ZONE_CHANGE_PROBABILITY)
+      zone.getExplorationCount() > 50 || // Too many explored points
+      Math.abs(currentPos.x - zone.x * 10) > 5 ||
+      Math.abs(currentPos.y - zone.y * 10) > 5
     );
   }
 
   private Zone calculateNextZone(String agName, Point currentPos) {
-    // Get all previous zones for this agent
-    Set<Point> previousZones = agentZones
-      .values()
-      .stream()
-      .map(z -> new Point(z.x, z.y))
-      .collect(Collectors.toSet());
+    int currentZoneX = currentPos.x / 10;
+    int currentZoneY = currentPos.y / 10;
 
-    // Calculate potential new zones
     List<Zone> potentialZones = new ArrayList<>();
-    int[] offsets = { -ZONE_SIZE, 0, ZONE_SIZE };
-
-    for (int dx : offsets) {
-      for (int dy : offsets) {
+    for (int dx = -1; dx <= 1; dx++) {
+      for (int dy = -1; dy <= 1; dy++) {
         if (dx == 0 && dy == 0) continue;
-
-        int newX = currentPos.x + dx;
-        int newY = currentPos.y + dy;
-
-        // Check if within bounds and not too far from center
-        if (
-          Math.abs(newX) <= MAX_ZONE_DISTANCE &&
-          Math.abs(newY) <= MAX_ZONE_DISTANCE &&
-          !previousZones.contains(new Point(newX, newY))
-        ) {
-          potentialZones.add(new Zone(newX, newY));
-        }
+        potentialZones.add(new Zone(currentZoneX + dx, currentZoneY + dy));
       }
     }
 
-    // If no valid zones found, reset to a random direction within bounds
     if (potentialZones.isEmpty()) {
-      int x = random.nextInt(MAX_ZONE_DISTANCE * 2) - MAX_ZONE_DISTANCE;
-      int y = random.nextInt(MAX_ZONE_DISTANCE * 2) - MAX_ZONE_DISTANCE;
-      return new Zone(x, y);
+      return new Zone(
+        currentZoneX + random.nextInt(3) - 1,
+        currentZoneY + random.nextInt(3) - 1
+      );
     }
 
-    // Choose random zone from potential zones
     return potentialZones.get(random.nextInt(potentialZones.size()));
   }
 
@@ -632,32 +593,15 @@ public class MI6Model {
   }
 
   private String exploreWithinZone(Zone zone, List<String> safeDirections) {
-    // Prefer unexplored directions within the zone
-    List<String> unexploredDirs = safeDirections
-      .stream()
-      .filter(dir -> !zone.exploredPoints.contains(getPointInDirection(dir)))
-      .collect(Collectors.toList());
-
-    if (!unexploredDirs.isEmpty()) {
-      return unexploredDirs.get(random.nextInt(unexploredDirs.size()));
+    if (safeDirections.isEmpty()) {
+      return DIRECTIONS[random.nextInt(DIRECTIONS.length)];
     }
-
-    return null; // Let caller handle fallback
+    return safeDirections.get(random.nextInt(safeDirections.size()));
   }
 
-  private Point getPointInDirection(String direction) {
-    switch (direction) {
-      case "n":
-        return new Point(0, -1);
-      case "s":
-        return new Point(0, 1);
-      case "e":
-        return new Point(1, 0);
-      case "w":
-        return new Point(-1, 0);
-      default:
-        return new Point(0, 0);
-    }
+  private Set<Point> getExploredPoints(String agName) {
+    // Implementation for getting explored points
+    return new HashSet<>(); // Placeholder
   }
 
   private List<String> getPerpendicularDirections(String direction) {
@@ -670,5 +614,175 @@ public class MI6Model {
       perpDirs.add("s");
     }
     return perpDirs;
+  }
+
+  private PerceptCache parsePercepts(String agName) throws Exception {
+    PerceptCache cached = perceptCache.get(agName);
+    if (cached != null && cached.isValid()) {
+      return cached;
+    }
+
+    Point position = null;
+    BitSet obstacles = new BitSet(4);
+    LocalMap localMap = getOrCreateLocalMap(agName);
+
+    Map<String, Collection<Percept>> percepts = ei.getAllPercepts(agName);
+    if (percepts != null) {
+      for (Collection<Percept> perceptList : percepts.values()) {
+        localMap.scanPerceptions(perceptList);
+
+        for (Percept p : perceptList) {
+          if ("position".equals(p.getName())) {
+            Parameter[] params = p.getParameters().toArray(new Parameter[0]);
+            position =
+              new Point(
+                ((Numeral) params[0]).getValue().intValue(),
+                ((Numeral) params[1]).getValue().intValue()
+              );
+          }
+        }
+      }
+    }
+
+    PerceptCache newCache = new PerceptCache(
+      position != null ? position : new Point(0, 0),
+      obstacles
+    );
+    perceptCache.put(agName, newCache);
+    return newCache;
+  }
+
+  public void addPercept(String agName, Literal percept) {
+    if (percept.getFunctor().equals("find_nearest_dispenser")) {
+      System.out.println(
+        "Handling find_nearest_dispenser for agent: " + agName
+      );
+      LocalMap map = getOrCreateLocalMap(agName);
+
+      List<Point> dispensersB0 = map.findNearestDispenser("b0");
+      List<Point> dispensersB1 = map.findNearestDispenser("b1");
+
+      System.out.println("Dispensers B0: " + dispensersB0);
+      System.out.println("Dispensers B1: " + dispensersB1);
+
+      Point nearest = null;
+      String type = "";
+
+      if (!dispensersB0.isEmpty()) {
+        nearest = dispensersB0.get(0);
+        type = "b0";
+      } else if (!dispensersB1.isEmpty()) {
+        nearest = dispensersB1.get(0);
+        type = "b1";
+      }
+
+      if (nearest != null) {
+        List<String> path = map.findPathTo(nearest);
+        System.out.println("Path to nearest dispenser: " + path);
+        // addBelief(
+        //   agName,
+        //   Literal.parseLiteral(
+        //     String.format(
+        //       "find_nearest_dispenser(%s,%s)",
+        //       type,
+        //       ListTermImpl.parseList(path.toString())
+        //     )
+        //   )
+        // );
+      } else {
+        System.out.println("No dispenser found for agent " + agName);
+        // addBelief(
+        //   agName,
+        //   Literal.parseLiteral("find_nearest_dispenser(none,[])")
+        // );
+      }
+    }
+  }
+
+  private Zone getOrCreateZone(String agName, Point position) {
+    return agentZones.computeIfAbsent(
+      agName,
+      k -> new Zone(position.x / 10, position.y / 10)
+    );
+  }
+
+  public void updateExploration(String agName, Point currentPos) {
+    Zone currentZone = getOrCreateZone(agName, currentPos);
+    currentZone.recordExploration(currentPos);
+
+    if (shouldChangeZone(currentZone, currentPos)) {
+      Zone newZone = calculateNextZone(agName, currentPos);
+      agentZones.put(agName, newZone);
+    }
+  }
+
+  public boolean findNearestDispenser(String agName) {
+    // Check if already moving towards a dispenser
+    if (Boolean.TRUE.equals(movingToDispenser.get(agName))) {
+      System.out.println(
+        "Agent " + agName + " is already moving to a dispenser."
+      );
+      return true;
+    }
+
+    LocalMap map = getOrCreateLocalMap(agName);
+
+    List<Point> dispensersB0 = map.findNearestDispenser("b0");
+    List<Point> dispensersB1 = map.findNearestDispenser("b1");
+
+    Point nearest = null;
+    String type = "";
+
+    if (!dispensersB0.isEmpty()) {
+      nearest = dispensersB0.get(0);
+      type = "b0";
+    } else if (!dispensersB1.isEmpty()) {
+      nearest = dispensersB1.get(0);
+      type = "b1";
+    }
+
+    if (nearest != null) {
+      List<String> path = map.findPathTo(nearest);
+      agentPaths.put(agName, path);
+      movingToDispenser.put(agName, true);
+      System.out.println("Path to nearest dispenser: " + path);
+      return true;
+    } else {
+      System.out.println("No dispenser found for agent " + agName);
+      agentPaths.remove(agName);
+      return false;
+    }
+  }
+
+  public boolean moveToNearestDispenser(String agName) {
+    List<String> path = agentPaths.get(agName);
+    if (path == null || path.isEmpty()) {
+      System.out.println("No path available for agent " + agName);
+      movingToDispenser.put(agName, false);
+      return false;
+    }
+
+    String nextMove = path.remove(0);
+    try {
+      boolean success = moveTowards(agName, nextMove);
+      if (!success) {
+        System.out.println("Failed to move " + agName + " towards " + nextMove);
+        movingToDispenser.put(agName, false);
+        return false;
+      }
+      System.out.println("Agent " + agName + " moved towards " + nextMove);
+      if (path.isEmpty()) {
+        movingToDispenser.put(agName, false); // Reached the destination
+      }
+      return true;
+    } catch (Exception e) {
+      logger.log(Level.SEVERE, "Error moving agent " + agName, e);
+      movingToDispenser.put(agName, false);
+      return false;
+    }
+  }
+
+  public List<String> getPathToNearestDispenser(String agName) {
+    return agentPaths.getOrDefault(agName, Collections.emptyList());
   }
 }

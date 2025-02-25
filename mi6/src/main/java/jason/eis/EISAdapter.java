@@ -128,7 +128,37 @@ public class EISAdapter extends Environment implements AgentListener {
           int targetX = (int) ((NumberTerm) action.getTerm(0)).solve();
           int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
           String bestDir = model.chooseBestDirection(agName, targetX, targetY);
+          if (bestDir == null) {
+            logger.info(
+              "Agent " +
+              agName +
+              " is already moving to a dispenser, skipping random movement."
+            );
+            return false;
+          }
           return model.moveTowards(agName, bestDir);
+        case "move_to_nearest_dispenser":
+          boolean moving = model.moveToNearestDispenser(agName);
+          if (moving) {
+            addPercept(
+              agName,
+              Literal.parseLiteral("moving_to_dispenser(true)")
+            );
+          } else {
+            addPercept(
+              agName,
+              Literal.parseLiteral("moving_to_dispenser(false)")
+            );
+          }
+          return moving;
+        case "find_nearest_dispenser":
+          boolean found = model.findNearestDispenser(agName);
+          if (found) {
+            addPercept(agName, Literal.parseLiteral("found_dispenser(true)"));
+          } else {
+            addPercept(agName, Literal.parseLiteral("found_dispenser(false)"));
+          }
+          return found;
         default:
           return super.executeAction(agName, action);
       }
