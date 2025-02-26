@@ -216,11 +216,84 @@ public class LocalMap {
     // Clear old entities that are in view range but not seen
     clearOldEntitiesInView();
 
+    if (DEBUG) {
+      logger.info("=== Starting new percepts batch ===");
+      // Log all percepts for debugging
+      for (Percept p : percepts) {
+        logger.info("Raw percept: " + p.toString());
+      }
+    }
+
+    // Then process things (including obstacles)
     for (Percept p : percepts) {
-      try {
-        processPercept(p);
-      } catch (Exception e) {
-        logger.warning("Error processing percept: " + e.getMessage());
+      if ("thing".equals(p.getName())) {
+        Parameter[] params = p.getParameters().toArray(new Parameter[0]);
+        int relX = ((Numeral) params[0]).getValue().intValue();
+        int relY = ((Numeral) params[1]).getValue().intValue();
+        String type = ((Identifier) params[2]).getValue();
+        String subType = params.length > 3
+          ? ((Identifier) params[3]).getValue()
+          : null;
+
+        if (DEBUG) {
+          logger.info(
+            String.format(
+              "Thing percept details - X: %d, Y: %d, Type: '%s', SubType: '%s'",
+              relX,
+              relY,
+              type,
+              subType
+            )
+          );
+        }
+
+        Point relativePos = new Point(relX, relY);
+
+        if ("obstacle".equals(type)) {
+          if (DEBUG) {
+            logger.info("Found obstacle! Adding to map...");
+          }
+          addObstacle(relativePos);
+        } else if ("dispenser".equals(type)) {
+          addDispenser(relativePos, subType);
+        } else if ("block".equals(type)) {
+          addBlock(relativePos, subType);
+        }
+      }
+    }
+
+    // First process terrain (including goals)
+    for (Percept p : percepts) {
+      if ("terrain".equals(p.getName())) {
+        if (DEBUG) {
+          logger.info("Processing terrain percept: " + p);
+        }
+        Parameter param = p.getParameters().get(0);
+        if (param instanceof Function) {
+          Function terrainFunc = (Function) param;
+          if ("goal".equals(terrainFunc.getName())) {
+            // Process goal terrain
+            ParameterList goals = (ParameterList) terrainFunc
+              .getParameters()
+              .get(0);
+            for (Parameter goalParam : goals) {
+              ParameterList coords = (ParameterList) goalParam;
+              int relX = ((Numeral) coords.get(0)).getValue().intValue();
+              int relY = ((Numeral) coords.get(1)).getValue().intValue();
+              Point relativePos = new Point(relX, relY);
+              addGoal(relativePos);
+              if (DEBUG) {
+                logger.info(
+                  String.format(
+                    "Added goal at relative position (%d,%d)",
+                    relX,
+                    relY
+                  )
+                );
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -785,35 +858,59 @@ public class LocalMap {
     sb.append("Blocks:\n");
     for (Map.Entry<String, Set<MapEntity>> entry : blocksB0.entrySet()) {
       for (MapEntity entity : entry.getValue()) {
+        Point relativePos = toRelativePosition(entity.position);
         sb.append(
           String.format(
-            "  Location: (%d,%d), Type: b0\n",
+            "  Location: abs(%d,%d) -> rel(%d,%d), Type: b0\n",
             entity.position.x,
-            entity.position.y
+            entity.position.y,
+            relativePos.x,
+            relativePos.y
           )
         );
       }
     }
     for (Map.Entry<String, Set<MapEntity>> entry : blocksB1.entrySet()) {
       for (MapEntity entity : entry.getValue()) {
+        Point relativePos = toRelativePosition(entity.position);
         sb.append(
           String.format(
-            "  Location: (%d,%d), Type: b1\n",
+            "  Location: abs(%d,%d) -> rel(%d,%d), Type: b1\n",
             entity.position.x,
-            entity.position.y
+            entity.position.y,
+            relativePos.x,
+            relativePos.y
           )
         );
       }
     }
 
-    // Obstacles
-    sb.append("Obstacles:\n");
+    // Obstacles with relative coordinates
+    sb.append("Obstacles (Absolute -> Relative):\n");
     for (MapEntity entity : obstacles) {
+      Point relativePos = toRelativePosition(entity.position);
       sb.append(
         String.format(
-          "  Location: (%d,%d)\n",
+          "  Location: abs(%d,%d) -> rel(%d,%d)\n",
           entity.position.x,
-          entity.position.y
+          entity.position.y,
+          relativePos.x,
+          relativePos.y
+        )
+      );
+    }
+
+    // Goals with relative coordinates
+    sb.append("Goals (Absolute -> Relative):\n");
+    for (MapEntity entity : goals) {
+      Point relativePos = toRelativePosition(entity.position);
+      sb.append(
+        String.format(
+          "  Location: abs(%d,%d) -> rel(%d,%d)\n",
+          entity.position.x,
+          entity.position.y,
+          relativePos.x,
+          relativePos.y
         )
       );
     }
@@ -827,17 +924,6 @@ public class LocalMap {
           currentPosition.y
         )
       );
-    }
-
-    // Movement history
-    if (DEBUG && !movementHistory.isEmpty()) {
-      sb
-        .append("\nMovement History (last ")
-        .append(MAX_MOVEMENT_HISTORY)
-        .append(" moves):\n");
-      for (String move : movementHistory) {
-        sb.append("  ").append(move).append("\n");
-      }
     }
 
     return sb.toString();
