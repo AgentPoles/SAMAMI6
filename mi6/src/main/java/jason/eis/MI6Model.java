@@ -109,6 +109,8 @@ public class MI6Model {
 
   // In MI6Model.java, add:
   private final Map<String, LocalMap> agentMaps;
+  private final Map<String, Long> lastProcessedTime;
+  private static final long PERCEPT_THRESHOLD = 100; // 100ms threshold
 
   // Add PerceptCache class definition
   private static class PerceptCache {
@@ -146,6 +148,7 @@ public class MI6Model {
     this.perceptCache = new ConcurrentHashMap<>();
     this.agentPaths = new ConcurrentHashMap<>();
     this.movingToDispenser = new ConcurrentHashMap<>();
+    this.lastProcessedTime = new ConcurrentHashMap<>();
 
     LocalMap.DEBUG = true;
 
@@ -628,17 +631,22 @@ public class MI6Model {
 
   public void processPercepts(String agName, Collection<Percept> percepts) {
     try {
+      long currentTime = System.currentTimeMillis();
+      Long lastTime = lastProcessedTime.get(agName);
+
+      // Skip if we processed percepts too recently
+      if (lastTime != null && currentTime - lastTime < PERCEPT_THRESHOLD) {
+        return;
+      }
+
       if (!agentMaps.containsKey(agName)) {
         initializeAgent(agName);
       }
 
       LocalMap map = getAgentMap(agName);
 
-      // Use sets to deduplicate percepts
-      Set<Percept> uniquePercepts = new LinkedHashSet<>(percepts);
-
       // Process all percepts
-      for (Percept p : uniquePercepts) {
+      for (Percept p : percepts) {
         String name = p.getName();
         Parameter[] params = p.getParameters().toArray(new Parameter[0]);
 
@@ -660,6 +668,7 @@ public class MI6Model {
       }
 
       map.clearStaleEntities();
+      lastProcessedTime.put(agName, currentTime);
     } catch (Exception e) {
       logger.log(Level.WARNING, "Error processing percepts for " + agName, e);
     }

@@ -140,24 +140,15 @@ public class LocalMap {
   }
 
   public void updatePosition(Point newPosition) {
-    if (DEBUG) {
-      logger.fine(
-        String.format(
-          "Updating position from (%d,%d) to (%d,%d)",
-          currentPosition.x,
-          currentPosition.y,
-          newPosition.x,
-          newPosition.y
-        )
-      );
-    }
-
-    // Calculate movement from last relative position
+    clearStaleEntities();
+    // Current implementation accumulates relative changes
     int dx = newPosition.x - lastRelativePosition.x;
     int dy = newPosition.y - lastRelativePosition.y;
-
-    // Update absolute position
     currentPosition = new Point(currentPosition.x + dx, currentPosition.y + dy);
+    lastRelativePosition = newPosition;
+
+    // Should be simplified to direct update:
+    currentPosition = toAbsolutePosition(newPosition);
     lastRelativePosition = newPosition;
   }
 
@@ -191,14 +182,49 @@ public class LocalMap {
 
   // Entity management
   private String generateEntityId(EntityType type, Point pos) {
-    return String.format("%s_%d_%d_%d", type, pos.x, pos.y, System.nanoTime());
+    // Only use position and type to ensure same entity gets same ID
+    return String.format("%s_%d_%d", type, pos.x, pos.y);
   }
 
   private void addEntity(EntityType type, String subType, Point relativePos) {
+    clearStaleEntities();
     Point absolutePos = toAbsolutePosition(relativePos);
-    String entityId = generateEntityId(type, absolutePos);
 
-    // Create new entity
+    // Use spatial grid for more efficient lookup
+    Set<String> existingEntities = spatialGrid.getEntitiesInRange(
+      absolutePos,
+      0
+    );
+    boolean entityExists = existingEntities
+      .stream()
+      .map(entityRegistry::get)
+      .anyMatch(
+        e ->
+          e != null &&
+          e.type == type &&
+          Objects.equals(e.subType, subType) &&
+          e.position.equals(absolutePos) &&
+          !e.isStale()
+      );
+
+    if (entityExists) {
+      // Update lastSeen time of existing entities at this position
+      existingEntities
+        .stream()
+        .map(entityRegistry::get)
+        .filter(
+          e ->
+            e != null &&
+            e.type == type &&
+            Objects.equals(e.subType, subType) &&
+            e.position.equals(absolutePos)
+        )
+        .forEach(e -> e.lastSeen = System.nanoTime());
+      return;
+    }
+
+    // If no existing entity, create new one
+    String entityId = generateEntityId(type, absolutePos);
     Entity entity = new Entity(entityId, type, subType, absolutePos);
 
     // Update all indexes atomically
