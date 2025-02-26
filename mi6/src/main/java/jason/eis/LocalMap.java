@@ -40,6 +40,9 @@ public class LocalMap {
   private final List<String> movementHistory;
   private static final int MAX_MOVEMENT_HISTORY = 50; // Keep last 50 moves
 
+  private static final int DUPLICATE_TOLERANCE = 1; // Consider entities within 1 unit as potential duplicates
+  private static final long PERCEPTION_WINDOW = 500; // Time window in milliseconds for same perception
+
   public static boolean DEBUG = true; // Default to false
 
   // Inner class to represent entities with timestamp
@@ -83,7 +86,7 @@ public class LocalMap {
   }
 
   public LocalMap() {
-    // Initialize position tracking
+    // Start at origin
     this.currentPosition = new Point(0, 0);
     this.lastRelativePosition = new Point(0, 0);
 
@@ -107,13 +110,21 @@ public class LocalMap {
   }
 
   public void updatePosition(Point newPosition) {
-    // If this is the first position update
-    if (lastRelativePosition == null) {
-      lastRelativePosition = new Point(0, 0);
-      currentPosition = new Point(0, 0);
+    if (DEBUG) {
+      logger.info(
+        String.format(
+          "Updating position - Current: (%d,%d), LastRel: (%d,%d), NewRel: (%d,%d)",
+          currentPosition.x,
+          currentPosition.y,
+          lastRelativePosition.x,
+          lastRelativePosition.y,
+          newPosition.x,
+          newPosition.y
+        )
+      );
     }
 
-    // Calculate the difference in position
+    // Calculate movement from last relative position
     int dx = newPosition.x - lastRelativePosition.x;
     int dy = newPosition.y - lastRelativePosition.y;
 
@@ -123,10 +134,13 @@ public class LocalMap {
 
     if (DEBUG) {
       logger.info(
-        "Updated position to " +
-        currentPosition +
-        " from percept " +
-        newPosition
+        String.format(
+          "Position updated - New absolute: (%d,%d), Movement: (%d,%d)",
+          currentPosition.x,
+          currentPosition.y,
+          dx,
+          dy
+        )
       );
     }
   }
@@ -169,18 +183,30 @@ public class LocalMap {
   }
 
   /**
-   * Converts relative coordinates to absolute coordinates
-   * Handles the coordinate system where:
-   * - North is -y
-   * - South is +y
-   * - East is +x
-   * - West is -x
+   * Converts a relative position from percepts to absolute position
+   * Takes into account our current position relative to origin
    */
   private Point toAbsolutePosition(Point relativePos) {
-    return new Point(
-      currentPosition.x + relativePos.x, // X: positive is east
-      currentPosition.y + relativePos.y // Y: positive is south
+    Point absolutePos = new Point(
+      currentPosition.x + relativePos.x,
+      currentPosition.y + relativePos.y
     );
+
+    if (DEBUG) {
+      logger.info(
+        String.format(
+          "Converting position - Relative: (%d,%d), Current: (%d,%d), Absolute: (%d,%d)",
+          relativePos.x,
+          relativePos.y,
+          currentPosition.x,
+          currentPosition.y,
+          absolutePos.x,
+          absolutePos.y
+        )
+      );
+    }
+
+    return absolutePos;
   }
 
   /**
@@ -209,10 +235,26 @@ public class LocalMap {
     int relX = ((Numeral) params[0]).getValue().intValue();
     int relY = ((Numeral) params[1]).getValue().intValue();
     String type = ((Identifier) params[2]).getValue();
-
-    Point absPos = toAbsolutePosition(new Point(relX, relY));
     String subType = ((Identifier) params[3]).getValue();
-    MapEntity entity = new MapEntity(absPos, type, subType);
+
+    Point relativePos = new Point(relX, relY);
+    Point absolutePos = toAbsolutePosition(relativePos);
+
+    if (DEBUG) {
+      logger.info(
+        String.format(
+          "Processing percept - Type: %s, SubType: %s, RelPos: (%d,%d), AbsPos: (%d,%d)",
+          type,
+          subType,
+          relativePos.x,
+          relativePos.y,
+          absolutePos.x,
+          absolutePos.y
+        )
+      );
+    }
+
+    MapEntity entity = new MapEntity(absolutePos, type, subType);
 
     switch (type) {
       case "dispenser":
@@ -232,33 +274,143 @@ public class LocalMap {
         updateEntitySet(allBlocks, entity);
         break;
       case "obstacle":
-        updateEntitySet(obstacles, entity);
+        updateSimpleEntitySet(obstacles, entity);
         break;
       case "goal":
-        updateEntitySet(goals, entity);
+        updateSimpleEntitySet(goals, entity);
         break;
     }
 
-    entityMap.put(absPos, entity);
+    entityMap.put(absolutePos, entity);
   }
 
   /**
-   * Updates an entity set with new observation
+   * Updates an entity set with new observation, considering both position and timing
    */
   private void updateEntitySet(
     Map<String, Set<MapEntity>> map,
-    MapEntity entity
+    MapEntity newEntity
   ) {
-    map
-      .computeIfAbsent(
-        entity.type,
-        k -> Collections.newSetFromMap(new ConcurrentHashMap<>())
-      )
-      .add(entity);
-  }
+    Set<MapEntity> entities = map.computeIfAbsent(
+      newEntity.type,
+      k -> Collections.newSetFromMap(new ConcurrentHashMap<>())
+    );
 
-  private void updateEntitySet(Set<MapEntity> set, MapEntity entity) {
-    set.add(entity);
+    // First, check for exact position matches
+    Optional<MapEntity> exactMatch = entities
+      .stream()
+      .filter(
+        existing ->
+          existing.position.x == newEntity.position.x &&
+          existing.position.y == newEntity.position.y &&
+          existing.subType.equals(newEntity.subType)
+      )
+      .findFirst();
+
+    if (exactMatch.isPresent()) {
+      // Update timestamp of exact match
+      exactMatch.get().updateTimestamp();
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "Updated timestamp for existing %s at (%d,%d)",
+            newEntity.type,
+            newEntity.position.x,
+            newEntity.position.y
+          )
+        );
+      }
+      return;
+    }
+
+    // Check for nearby entities that might be duplicates
+    Set<MapEntity> nearbyEntities = entities
+      .stream()
+      .filter(
+        existing -> {
+          int dx = Math.abs(existing.position.x - newEntity.position.x);
+          int dy = Math.abs(existing.position.y - newEntity.position.y);
+          long timeDiff = Math.abs(existing.lastSeen - newEntity.lastSeen);
+
+          // Consider it a duplicate if:
+          // 1. It's within tolerance
+          // 2. It's the same type
+          // 3. It was seen very recently
+          return (
+            dx <= DUPLICATE_TOLERANCE &&
+            dy <= DUPLICATE_TOLERANCE &&
+            existing.subType.equals(newEntity.subType) &&
+            timeDiff < PERCEPTION_WINDOW
+          );
+        }
+      )
+      .collect(Collectors.toSet());
+
+    if (nearbyEntities.isEmpty()) {
+      // No duplicates found, add as new entity
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "Adding new %s at (%d,%d) [Current pos: (%d,%d)]",
+            newEntity.type,
+            newEntity.position.x,
+            newEntity.position.y,
+            currentPosition.x,
+            currentPosition.y
+          )
+        );
+      }
+      entities.add(newEntity);
+    } else {
+      // Found potential duplicate(s)
+      // Log all nearby entities for debugging
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "Found %d nearby %s entities near (%d,%d):",
+            nearbyEntities.size(),
+            newEntity.type,
+            newEntity.position.x,
+            newEntity.position.y
+          )
+        );
+        for (MapEntity nearby : nearbyEntities) {
+          logger.info(
+            String.format(
+              "  - At (%d,%d), seen %d ms ago",
+              nearby.position.x,
+              nearby.position.y,
+              System.currentTimeMillis() - nearby.lastSeen
+            )
+          );
+        }
+      }
+
+      // If multiple nearby entities exist, they're probably distinct
+      if (nearbyEntities.size() > 1) {
+        if (DEBUG) {
+          logger.info("Multiple nearby entities found, treating as new entity");
+        }
+        entities.add(newEntity);
+      } else {
+        // Single nearby entity, update its position
+        MapEntity existing = nearbyEntities.iterator().next();
+        if (DEBUG) {
+          logger.info(
+            String.format(
+              "Updating position of existing %s from (%d,%d) to (%d,%d)",
+              existing.type,
+              existing.position.x,
+              existing.position.y,
+              newEntity.position.x,
+              newEntity.position.y
+            )
+          );
+        }
+        entities.remove(existing);
+        entities.add(newEntity);
+      }
+    }
   }
 
   /**
@@ -595,26 +747,32 @@ public class LocalMap {
     StringBuilder sb = new StringBuilder();
     sb.append("LocalMap:\n");
 
-    // Dispensers
-    sb.append("Dispensers:\n");
+    // Dispensers with relative coordinates
+    sb.append("Dispensers (Absolute -> Relative):\n");
     for (Map.Entry<String, Set<MapEntity>> entry : dispensersB0.entrySet()) {
       for (MapEntity entity : entry.getValue()) {
+        Point relativePos = toRelativePosition(entity.position);
         sb.append(
           String.format(
-            "  Location: (%d,%d), Type: b0\n",
+            "  Location: abs(%d,%d) -> rel(%d,%d), Type: b0\n",
             entity.position.x,
-            entity.position.y
+            entity.position.y,
+            relativePos.x,
+            relativePos.y
           )
         );
       }
     }
     for (Map.Entry<String, Set<MapEntity>> entry : dispensersB1.entrySet()) {
       for (MapEntity entity : entry.getValue()) {
+        Point relativePos = toRelativePosition(entity.position);
         sb.append(
           String.format(
-            "  Location: (%d,%d), Type: b1\n",
+            "  Location: abs(%d,%d) -> rel(%d,%d), Type: b1\n",
             entity.position.x,
-            entity.position.y
+            entity.position.y,
+            relativePos.x,
+            relativePos.y
           )
         );
       }
@@ -668,7 +826,7 @@ public class LocalMap {
       );
     }
 
-    // Add movement history if in debug mode
+    // Movement history
     if (DEBUG && !movementHistory.isEmpty()) {
       sb
         .append("\nMovement History (last ")
@@ -682,41 +840,177 @@ public class LocalMap {
     return sb.toString();
   }
 
+  /**
+   * Convert absolute position to relative position from current position
+   */
+  private Point toRelativePosition(Point absolutePos) {
+    // Calculate relative coordinates from current position
+    Point relativePos = new Point(
+      absolutePos.x - currentPosition.x, // X: difference in x
+      absolutePos.y - currentPosition.y // Y: difference in y (south is positive)
+    );
+
+    if (DEBUG) {
+      logger.info(
+        String.format(
+          "Converting absolute (%d,%d) to relative (%d,%d) from current pos (%d,%d)",
+          absolutePos.x,
+          absolutePos.y,
+          relativePos.x,
+          relativePos.y,
+          currentPosition.x,
+          currentPosition.y
+        )
+      );
+    }
+
+    return relativePos;
+  }
+
   public void addDispenser(Point relativePos, String type) {
     Point absolutePos = toAbsolutePosition(relativePos);
     MapEntity entity = new MapEntity(absolutePos, "dispenser", type);
+
     if (type.equals("b0")) {
       updateEntitySet(dispensersB0, entity);
     } else if (type.equals("b1")) {
       updateEntitySet(dispensersB1, entity);
     }
     updateEntitySet(allDispensers, entity);
-    entityMap.put(absolutePos, entity);
+
+    // Only update entityMap if it's a new entity
+    if (!entityMap.containsKey(absolutePos)) {
+      entityMap.put(absolutePos, entity);
+    }
   }
 
   public void addBlock(Point relativePos, String type) {
     Point absolutePos = toAbsolutePosition(relativePos);
     MapEntity entity = new MapEntity(absolutePos, "block", type);
+
     if (type.equals("b0")) {
       updateEntitySet(blocksB0, entity);
     } else if (type.equals("b1")) {
       updateEntitySet(blocksB1, entity);
     }
     updateEntitySet(allBlocks, entity);
-    entityMap.put(absolutePos, entity);
+
+    // Only update entityMap if it's a new entity
+    if (!entityMap.containsKey(absolutePos)) {
+      entityMap.put(absolutePos, entity);
+    }
+  }
+
+  /**
+   * Updates a simple entity set with new observation, considering both position and timing
+   */
+  private void updateSimpleEntitySet(
+    Set<MapEntity> entities,
+    MapEntity newEntity
+  ) {
+    // First, check for exact position matches
+    Optional<MapEntity> exactMatch = entities
+      .stream()
+      .filter(
+        existing ->
+          existing.position.x == newEntity.position.x &&
+          existing.position.y == newEntity.position.y
+      )
+      .findFirst();
+
+    if (exactMatch.isPresent()) {
+      // Update timestamp of exact match
+      exactMatch.get().updateTimestamp();
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "Updated timestamp for existing %s at (%d,%d)",
+            newEntity.type,
+            newEntity.position.x,
+            newEntity.position.y
+          )
+        );
+      }
+      return;
+    }
+
+    // Check for nearby entities that might be duplicates
+    Set<MapEntity> nearbyEntities = entities
+      .stream()
+      .filter(
+        existing -> {
+          int dx = Math.abs(existing.position.x - newEntity.position.x);
+          int dy = Math.abs(existing.position.y - newEntity.position.y);
+          long timeDiff = Math.abs(existing.lastSeen - newEntity.lastSeen);
+
+          return (
+            dx <= DUPLICATE_TOLERANCE &&
+            dy <= DUPLICATE_TOLERANCE &&
+            timeDiff < PERCEPTION_WINDOW
+          );
+        }
+      )
+      .collect(Collectors.toSet());
+
+    if (nearbyEntities.isEmpty()) {
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "Adding new %s at (%d,%d) [Current pos: (%d,%d)]",
+            newEntity.type,
+            newEntity.position.x,
+            newEntity.position.y,
+            currentPosition.x,
+            currentPosition.y
+          )
+        );
+      }
+      entities.add(newEntity);
+    } else if (nearbyEntities.size() == 1) {
+      // Single nearby entity, update its position
+      MapEntity existing = nearbyEntities.iterator().next();
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "Updating position of existing %s from (%d,%d) to (%d,%d)",
+            existing.type,
+            existing.position.x,
+            existing.position.y,
+            newEntity.position.x,
+            newEntity.position.y
+          )
+        );
+      }
+      entities.remove(existing);
+      entities.add(newEntity);
+    } else {
+      // Multiple nearby entities, treat as new
+      if (DEBUG) {
+        logger.info("Multiple nearby entities found, treating as new entity");
+      }
+      entities.add(newEntity);
+    }
   }
 
   public void addObstacle(Point relativePos) {
     Point absolutePos = toAbsolutePosition(relativePos);
     MapEntity entity = new MapEntity(absolutePos, "obstacle", null);
-    updateEntitySet(obstacles, entity);
-    entityMap.put(absolutePos, entity);
+
+    updateSimpleEntitySet(obstacles, entity);
+
+    if (!entityMap.containsKey(absolutePos)) {
+      entityMap.put(absolutePos, entity);
+    }
   }
 
   public void addGoal(Point relativePos) {
     Point absolutePos = toAbsolutePosition(relativePos);
     MapEntity entity = new MapEntity(absolutePos, "goal", null);
-    updateEntitySet(goals, entity);
-    entityMap.put(absolutePos, entity);
+
+    updateSimpleEntitySet(goals, entity);
+
+    if (!entityMap.containsKey(absolutePos)) {
+      entityMap.put(absolutePos, entity);
+    }
   }
 }
