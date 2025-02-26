@@ -8,6 +8,7 @@ import jason.eis.movements.PlannedMovement;
 import jason.eis.movements.RandomMovement;
 import jason.environment.Environment;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -36,7 +37,7 @@ public class MI6Model {
   };
 
   // Movement tracking with efficient data structures
-  private final Map<String, MovementHistory> agentMovement = new HashMap<>();
+  private final Map<String, MovementHistory> agentMovement;
 
   // Add failure type constants
   private static final String FAILED_PATH = "failed_path";
@@ -104,10 +105,10 @@ public class MI6Model {
   }
 
   // Track zones per agent
-  private final Map<String, Zone> agentZones = new HashMap<>();
+  private final Map<String, Zone> agentZones;
 
   // In MI6Model.java, add:
-  private final Map<String, LocalMap> agentMaps = new HashMap<>();
+  private final Map<String, LocalMap> agentMaps;
 
   // Add PerceptCache class definition
   private static class PerceptCache {
@@ -126,45 +127,103 @@ public class MI6Model {
     }
   }
 
-  private final Map<String, PerceptCache> perceptCache = new HashMap<>();
+  private final Map<String, PerceptCache> perceptCache;
 
   // Store paths for each agent
-  private final Map<String, List<String>> agentPaths = new HashMap<>();
+  private final Map<String, List<String>> agentPaths;
   // Track if an agent is moving towards a dispenser
-  private final Map<String, Boolean> movingToDispenser = new HashMap<>();
+  private final Map<String, Boolean> movingToDispenser;
 
   // Add new field declarations
   private final RandomMovement randomMovement;
   private final PlannedMovement plannedMovement;
 
-  private LocalMap getOrCreateLocalMap(String agName) {
-    return agentMaps.computeIfAbsent(agName, k -> new LocalMap());
-  }
-
   public MI6Model(EnvironmentInterfaceStandard ei) {
     this.ei = ei;
+    this.agentMaps = new ConcurrentHashMap<>();
+    this.agentMovement = new ConcurrentHashMap<>();
+    this.agentZones = new ConcurrentHashMap<>();
+    this.perceptCache = new ConcurrentHashMap<>();
+    this.agentPaths = new ConcurrentHashMap<>();
+    this.movingToDispenser = new ConcurrentHashMap<>();
 
-    // Set DEBUG mode
-    LocalMap.DEBUG = true; // Set to true or false as needed
+    LocalMap.DEBUG = true;
 
-    // Initialize movement classes with agentMaps
     this.randomMovement = new RandomMovement(agentMaps);
     this.plannedMovement = new PlannedMovement(agentMaps);
   }
 
+  public void initializeAgent(String agName) {
+    if (!agentMaps.containsKey(agName)) {
+      agentMaps.put(agName, new LocalMap());
+      agentMovement.put(agName, new MovementHistory());
+      if (LocalMap.DEBUG) {
+        logger.info(String.format("[%s] Initialized new agent", agName));
+      }
+    }
+  }
+
+  private LocalMap getAgentMap(String agName) {
+    LocalMap map = agentMaps.get(agName);
+    if (map == null) {
+      throw new IllegalStateException("Agent " + agName + " not initialized");
+    }
+    return map;
+  }
+
   public boolean moveTowards(String agName, String direction) throws Exception {
+    LocalMap map = getAgentMap(agName);
+    Point oldPosition = map.getCurrentPosition();
+
     try {
-      ei.performAction(
-        agName,
-        new Action("move", new Identifier(direction.toLowerCase()))
-      );
-      // Update the local map position after successful movement
-      LocalMap map = getOrCreateLocalMap(agName);
+      if (LocalMap.DEBUG) {
+        logger.info(
+          String.format(
+            "[%s] Attempting to move %s from position %s",
+            agName,
+            direction,
+            oldPosition
+          )
+        );
+      }
+
+      Action move = new Action("move", new Identifier(direction.toLowerCase()));
+      ei.performAction(agName, move); // Try the move first
+
+      // Only update position if move succeeded
       map.updatePositionFromMovement(direction);
       randomMovement.recordSuccess(agName);
+
+      if (LocalMap.DEBUG) {
+        logger.info(
+          String.format(
+            "[%s] Successfully moved %s to position %s",
+            agName,
+            direction,
+            map.getCurrentPosition()
+          )
+        );
+      }
+
       return true;
     } catch (Exception e) {
+      // Position doesn't need to be reverted since we never updated it
       return handleMoveFailure(agName, direction, e);
+    }
+  }
+
+  private Point calculateNewPosition(Point current, String direction) {
+    switch (direction.toLowerCase()) {
+      case "n":
+        return new Point(current.x, current.y - 1);
+      case "s":
+        return new Point(current.x, current.y + 1);
+      case "e":
+        return new Point(current.x + 1, current.y);
+      case "w":
+        return new Point(current.x - 1, current.y);
+      default:
+        return current;
     }
   }
 
@@ -598,7 +657,7 @@ public class MI6Model {
 
     Point position = null;
     BitSet obstacles = new BitSet(4);
-    LocalMap localMap = getOrCreateLocalMap(agName);
+    LocalMap localMap = getAgentMap(agName);
 
     Map<String, Collection<Percept>> percepts = ei.getAllPercepts(agName);
     if (percepts != null) {
@@ -631,7 +690,16 @@ public class MI6Model {
     String agName,
     Collection<Percept> percepts
   ) {
-    LocalMap map = getOrCreateLocalMap(agName);
+    // Auto-initialize agent if not already initialized
+    if (!agentMaps.containsKey(agName)) {
+      if (LocalMap.DEBUG) {
+        logger.info(String.format("[%s] Auto-initializing agent", agName));
+      }
+      initializeAgent(agName);
+    }
+
+    LocalMap map = getAgentMap(agName);
+
     for (Percept p : percepts) {
       if ("thing".equals(p.getName())) {
         Parameter[] params = p.getParameters().toArray(new Parameter[0]);
@@ -674,7 +742,7 @@ public class MI6Model {
       System.out.println(
         "Handling find_nearest_dispenser for agent: " + agName
       );
-      LocalMap map = getOrCreateLocalMap(agName);
+      LocalMap map = getAgentMap(agName);
 
       List<Point> dispensersB0 = map.findNearestDispenser("b0");
       List<Point> dispensersB1 = map.findNearestDispenser("b1");
@@ -762,7 +830,7 @@ public class MI6Model {
 
   public void logMapState(String agName) {
     if (LocalMap.DEBUG) {
-      LocalMap map = getOrCreateLocalMap(agName);
+      LocalMap map = getAgentMap(agName);
       logger.info("Map state for agent " + agName + ":\n" + map.toString());
     }
   }

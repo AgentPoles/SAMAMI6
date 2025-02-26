@@ -53,6 +53,7 @@ public class EISAdapter extends Environment implements AgentListener {
 
         public void handleStateChange(EnvironmentState s) {
           logger.info("new state " + s);
+          EISAdapter.this.handleStateChange(s); // Call the class method instead
         }
 
         public void handleDeletedEntity(String arg0, Collection<String> arg1) {}
@@ -79,39 +80,26 @@ public class EISAdapter extends Environment implements AgentListener {
   public void handlePercept(String agent, Percept percept) {}
 
   @Override
-  public List<Literal> getPercepts(String agName) {
-    Collection<Literal> ps = super.getPercepts(agName);
-    List<Literal> percepts = ps == null
-      ? new ArrayList<>()
-      : new ArrayList<>(ps);
+  public Collection<Literal> getPercepts(String agName) {
+    // Ensure agent is initialized
+    model.initializeAgent(agName);
 
-    clearPercepts(agName);
+    try {
+      Collection<Literal> percepts = new ArrayList<>();
+      Map<String, Collection<Percept>> allPercepts = ei.getAllPercepts(agName);
 
-    if (ei != null) {
-      try {
-        Map<String, Collection<Percept>> perMap = ei.getAllPercepts(agName);
-        for (String entity : perMap.keySet()) {
-          Structure strcEnt = ASSyntax.createStructure(
-            "entity",
-            ASSyntax.createAtom(entity)
-          );
-
-          // Update the model's local map with the new percepts
-          model.updateLocalMapWithPercepts(agName, perMap.get(entity));
-
-          for (Percept p : perMap.get(entity)) {
-            try {
-              percepts.add(perceptToLiteral(p).addAnnots(strcEnt));
-            } catch (Exception e) {
-              logger.warning("Error converting percept: " + e.getMessage());
-            }
-          }
+      if (allPercepts != null) {
+        for (Collection<Percept> ps : allPercepts.values()) {
+          model.updateLocalMapWithPercepts(agName, ps);
+          percepts.addAll(perceptsToLiterals(ps));
         }
-      } catch (PerceiveException e) {
-        logger.log(Level.WARNING, "Could not perceive.", e);
       }
+
+      return percepts;
+    } catch (Exception e) {
+      logger.severe("Error getting percepts for " + agName + ": " + e);
+      return Collections.emptyList();
     }
-    return percepts;
   }
 
   @Override
@@ -261,5 +249,33 @@ public class EISAdapter extends Environment implements AgentListener {
       }
     }
     return new Identifier(t.toString());
+  }
+
+  public void handleStateChange(EnvironmentState newState) {
+    // When environment becomes ready, initialize all agents
+    if (newState == EnvironmentState.PAUSED) {
+      try {
+        for (String agent : ei.getAgents()) {
+          model.initializeAgent(agent);
+          logger.info("Initialized agent: " + agent);
+        }
+      } catch (Exception e) {
+        logger.severe("Error initializing agents: " + e.getMessage());
+      }
+    }
+  }
+
+  private Collection<Literal> perceptsToLiterals(Collection<Percept> percepts) {
+    List<Literal> literals = new ArrayList<>();
+    for (Percept p : percepts) {
+      try {
+        literals.add(perceptToLiteral(p));
+      } catch (Exception e) {
+        logger.warning(
+          "Failed to convert percept to literal: " + p + " - " + e.getMessage()
+        );
+      }
+    }
+    return literals;
   }
 }
