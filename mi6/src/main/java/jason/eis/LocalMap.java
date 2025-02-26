@@ -229,59 +229,62 @@ public class LocalMap {
    * Processes individual percepts
    */
   private void processPercept(Percept percept) {
-    if (!"thing".equals(percept.getName())) return;
-
+    String name = percept.getName();
     Parameter[] params = percept.getParameters().toArray(new Parameter[0]);
+
+    // Get coordinates which are always the first two parameters
     int relX = ((Numeral) params[0]).getValue().intValue();
     int relY = ((Numeral) params[1]).getValue().intValue();
-    String type = ((Identifier) params[2]).getValue();
-    String subType = ((Identifier) params[3]).getValue();
-
     Point relativePos = new Point(relX, relY);
     Point absolutePos = toAbsolutePosition(relativePos);
 
-    if (DEBUG) {
-      logger.info(
-        String.format(
-          "Processing percept - Type: %s, SubType: %s, RelPos: (%d,%d), AbsPos: (%d,%d)",
-          type,
-          subType,
-          relativePos.x,
-          relativePos.y,
-          absolutePos.x,
-          absolutePos.y
-        )
-      );
+    if ("thing".equals(name)) {
+      String type = ((Identifier) params[2]).getValue();
+      String subType = params.length > 3
+        ? ((Identifier) params[3]).getValue()
+        : null;
+
+      MapEntity entity = new MapEntity(absolutePos, type, subType);
+
+      switch (type) {
+        case "dispenser":
+          if ("b0".equals(subType)) {
+            updateEntitySet(dispensersB0, entity);
+          } else if ("b1".equals(subType)) {
+            updateEntitySet(dispensersB1, entity);
+          }
+          updateEntitySet(allDispensers, entity);
+          break;
+        case "block":
+          if ("b0".equals(subType)) {
+            updateEntitySet(blocksB0, entity);
+          } else if ("b1".equals(subType)) {
+            updateEntitySet(blocksB1, entity);
+          }
+          updateEntitySet(allBlocks, entity);
+          break;
+        case "obstacle":
+          updateSimpleEntitySet(obstacles, entity);
+          break;
+      }
+      entityMap.put(absolutePos, entity);
+    } else if ("goal".equals(name)) {
+      MapEntity entity = new MapEntity(absolutePos, "goal", null);
+      updateSimpleEntitySet(goals, entity);
+      entityMap.put(absolutePos, entity);
+
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "Added goal at relative (%d,%d) -> absolute (%d,%d)",
+            relX,
+            relY,
+            absolutePos.x,
+            absolutePos.y
+          )
+        );
+      }
     }
-
-    MapEntity entity = new MapEntity(absolutePos, type, subType);
-
-    switch (type) {
-      case "dispenser":
-        if ("b0".equals(subType)) {
-          updateEntitySet(dispensersB0, entity);
-        } else if ("b1".equals(subType)) {
-          updateEntitySet(dispensersB1, entity);
-        }
-        updateEntitySet(allDispensers, entity);
-        break;
-      case "block":
-        if ("b0".equals(subType)) {
-          updateEntitySet(blocksB0, entity);
-        } else if ("b1".equals(subType)) {
-          updateEntitySet(blocksB1, entity);
-        }
-        updateEntitySet(allBlocks, entity);
-        break;
-      case "obstacle":
-        updateSimpleEntitySet(obstacles, entity);
-        break;
-      case "goal":
-        updateSimpleEntitySet(goals, entity);
-        break;
-    }
-
-    entityMap.put(absolutePos, entity);
   }
 
   /**
