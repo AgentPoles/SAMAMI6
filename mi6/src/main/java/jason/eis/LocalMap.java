@@ -15,7 +15,6 @@ public class LocalMap {
 
   // Current position tracking
   private Point currentPosition;
-  private Point lastRelativePosition;
 
   // Efficient spatial indexing
   private final SpatialGrid spatialGrid;
@@ -27,6 +26,9 @@ public class LocalMap {
   private final Map<String, Entity> entityRegistry;
 
   private final Set<Point> obstacles;
+
+  // Add a lock for position updates
+  private final Object positionLock = new Object();
 
   public enum EntityType {
     DISPENSER,
@@ -40,13 +42,21 @@ public class LocalMap {
     final EntityType type;
     final String subType; // b0/b1 for blocks/dispensers
     Point position;
+    Point agentPosWhenAdded;
     long lastSeen;
 
-    Entity(String id, EntityType type, String subType, Point position) {
+    Entity(
+      String id,
+      EntityType type,
+      String subType,
+      Point position,
+      Point agentPos
+    ) {
       this.id = id;
       this.type = type;
       this.subType = subType;
       this.position = position;
+      this.agentPosWhenAdded = agentPos;
       this.lastSeen = System.nanoTime();
     }
 
@@ -71,59 +81,54 @@ public class LocalMap {
     public int hashCode() {
       return id.hashCode();
     }
+
+    void updateLastSeen(Point currentPosition) {
+      this.lastSeen = System.nanoTime();
+    }
   }
 
   private static class SpatialGrid {
-    private final Map<Long, Set<String>> grid = new ConcurrentHashMap<>();
-
-    private long hashPos(Point p) {
-      // Combine x,y into single long for efficient grid lookup
-      // Shift by CELL_SIZE (8) for efficient cell division
-      return ((long) (p.x >> 3) << 32) | ((p.y >> 3) & 0xFFFFFFFFL);
-    }
+    private final Map<Point, Set<String>> grid = new ConcurrentHashMap<>();
 
     void add(Point p, String entityId) {
-      grid
-        .computeIfAbsent(hashPos(p), k -> ConcurrentHashMap.newKeySet())
-        .add(entityId);
+      grid.computeIfAbsent(p, k -> ConcurrentHashMap.newKeySet()).add(entityId);
     }
 
     void remove(Point p, String entityId) {
-      Set<String> cell = grid.get(hashPos(p));
+      Set<String> cell = grid.get(p);
       if (cell != null) {
         cell.remove(entityId);
         if (cell.isEmpty()) {
-          grid.remove(hashPos(p));
+          grid.remove(p);
         }
       }
+    }
+
+    Set<String> getEntitiesInRange(Point center, int range) {
+      Set<String> result = ConcurrentHashMap.newKeySet();
+
+      // Use exact coordinate matching within range
+      for (int x = -range; x <= range; x++) {
+        for (int y = -range; y <= range; y++) {
+          Point p = new Point(center.x + x, center.y + y);
+          Set<String> entities = grid.get(p);
+          if (entities != null) {
+            result.addAll(entities);
+          }
+        }
+      }
+      return result;
     }
 
     void move(Point oldPos, Point newPos, String entityId) {
       remove(oldPos, entityId);
       add(newPos, entityId);
     }
-
-    Set<String> getEntitiesInRange(Point center, int range) {
-      Set<String> result = ConcurrentHashMap.newKeySet();
-      int gridRange = (range + CELL_SIZE - 1) / CELL_SIZE;
-
-      for (int x = -gridRange; x <= gridRange; x++) {
-        for (int y = -gridRange; y <= gridRange; y++) {
-          Point p = new Point(center.x + (x << 3), center.y + (y << 3));
-          Set<String> cell = grid.get(hashPos(p));
-          if (cell != null) {
-            result.addAll(cell);
-          }
-        }
-      }
-      return result;
-    }
   }
 
   public LocalMap() {
     this.obstacles = new HashSet<>();
     this.currentPosition = new Point(0, 0);
-    this.lastRelativePosition = new Point(0, 0);
     this.spatialGrid = new SpatialGrid();
     this.typeIndex = new EnumMap<>(EntityType.class);
     this.entityRegistry = new ConcurrentHashMap<>();
@@ -140,108 +145,114 @@ public class LocalMap {
   }
 
   public void updatePosition(Point newPosition) {
-    clearStaleEntities();
-    // Current implementation accumulates relative changes
-    int dx = newPosition.x - lastRelativePosition.x;
-    int dy = newPosition.y - lastRelativePosition.y;
-    currentPosition = new Point(currentPosition.x + dx, currentPosition.y + dy);
-    lastRelativePosition = newPosition;
-
-    // Should be simplified to direct update:
-    currentPosition = toAbsolutePosition(newPosition);
-    lastRelativePosition = newPosition;
+    synchronized (positionLock) {
+      if (DEBUG) {
+        logger.fine(
+          String.format(
+            "Updating position from (%d,%d) to (%d,%d)",
+            currentPosition.x,
+            currentPosition.y,
+            newPosition.x,
+            newPosition.y
+          )
+        );
+      }
+      currentPosition = newPosition;
+    }
   }
 
   public void updatePositionFromMovement(String direction) {
-    switch (direction.toLowerCase()) {
-      case "n":
-        currentPosition = new Point(currentPosition.x, currentPosition.y - 1);
-        break;
-      case "s":
-        currentPosition = new Point(currentPosition.x, currentPosition.y + 1);
-        break;
-      case "e":
-        currentPosition = new Point(currentPosition.x + 1, currentPosition.y);
-        break;
-      case "w":
-        currentPosition = new Point(currentPosition.x - 1, currentPosition.y);
-        break;
-    }
+    synchronized (positionLock) {
+      Point newPosition;
+      switch (direction.toLowerCase()) {
+        case "n":
+          newPosition = new Point(currentPosition.x, currentPosition.y - 1);
+          break;
+        case "s":
+          newPosition = new Point(currentPosition.x, currentPosition.y + 1);
+          break;
+        case "e":
+          newPosition = new Point(currentPosition.x + 1, currentPosition.y);
+          break;
+        case "w":
+          newPosition = new Point(currentPosition.x - 1, currentPosition.y);
+          break;
+        default:
+          return;
+      }
 
-    if (DEBUG) {
-      logger.fine(
-        String.format(
-          "Updated position to (%d,%d) after moving %s",
-          currentPosition.x,
-          currentPosition.y,
-          direction
-        )
-      );
+      if (DEBUG) {
+        logger.fine(
+          String.format(
+            "Moving %s: Updating position from (%d,%d) to (%d,%d)",
+            direction,
+            currentPosition.x,
+            currentPosition.y,
+            newPosition.x,
+            newPosition.y
+          )
+        );
+      }
+      currentPosition = newPosition;
     }
   }
 
   // Entity management
-  private String generateEntityId(EntityType type, Point pos) {
-    // Only use position and type to ensure same entity gets same ID
-    return String.format("%s_%d_%d", type, pos.x, pos.y);
+  private void addEntity(EntityType type, String subType, Point relativePos) {
+    synchronized (positionLock) {
+      Point absolutePos = new Point(
+        currentPosition.x + relativePos.x,
+        currentPosition.y + relativePos.y
+      );
+
+      // First, clean up any stale entities
+      cleanupStaleEntities(type);
+
+      // Check if this exact entity already exists
+      String entityId = generateEntityId(type, absolutePos, subType);
+      Entity existingEntity = entityRegistry.get(entityId);
+
+      if (existingEntity != null && !existingEntity.isStale()) {
+        // Just update the last seen time
+        existingEntity.updateLastSeen(currentPosition);
+        return;
+      }
+
+      Entity entity = new Entity(
+        entityId,
+        type,
+        subType,
+        absolutePos,
+        currentPosition
+      );
+
+      entityRegistry.put(entityId, entity);
+      typeIndex.get(type).put(entityId, entity);
+      spatialGrid.add(absolutePos, entityId);
+    }
   }
 
-  private void addEntity(EntityType type, String subType, Point relativePos) {
-    clearStaleEntities();
-    Point absolutePos = toAbsolutePosition(relativePos);
-
-    // Use spatial grid for more efficient lookup
-    Set<String> existingEntities = spatialGrid.getEntitiesInRange(
-      absolutePos,
-      0
-    );
-    boolean entityExists = existingEntities
-      .stream()
-      .map(entityRegistry::get)
-      .anyMatch(
+  private void cleanupStaleEntities(EntityType type) {
+    // Remove entities that haven't been seen in a while
+    long now = System.currentTimeMillis();
+    typeIndex
+      .get(type)
+      .values()
+      .removeIf(
         e ->
-          e != null &&
-          e.type == type &&
-          Objects.equals(e.subType, subType) &&
-          e.position.equals(absolutePos) &&
-          !e.isStale()
+          now - e.lastSeen > STALE_THRESHOLD &&
+          !e.position.equals(currentPosition) // Don't remove entities at current position
       );
+  }
 
-    if (entityExists) {
-      // Update lastSeen time of existing entities at this position
-      existingEntities
-        .stream()
-        .map(entityRegistry::get)
-        .filter(
-          e ->
-            e != null &&
-            e.type == type &&
-            Objects.equals(e.subType, subType) &&
-            e.position.equals(absolutePos)
-        )
-        .forEach(e -> e.lastSeen = System.nanoTime());
-      return;
-    }
-
-    // If no existing entity, create new one
-    String entityId = generateEntityId(type, absolutePos);
-    Entity entity = new Entity(entityId, type, subType, absolutePos);
-
-    // Update all indexes atomically
-    entityRegistry.put(entityId, entity);
-    typeIndex.get(type).put(entityId, entity);
-    spatialGrid.add(absolutePos, entityId);
-
-    if (DEBUG) {
-      logger.fine(
-        String.format(
-          "Added %s entity at (%d,%d)",
-          type,
-          absolutePos.x,
-          absolutePos.y
-        )
-      );
-    }
+  private String generateEntityId(EntityType type, Point pos, String subType) {
+    return String.format(
+      "%s_%d_%d_%s",
+      type,
+      pos.x,
+      pos.y,
+      subType != null ? subType : ""
+    );
   }
 
   // Public API for adding entities
@@ -253,27 +264,33 @@ public class LocalMap {
     addEntity(EntityType.BLOCK, subType, relativePos);
   }
 
-  public void addObstacle(Point position) {
-    obstacles.add(position);
+  public void addObstacle(Point relativePos) {
+    synchronized (positionLock) {
+      Point absolutePos = new Point(
+        currentPosition.x + relativePos.x,
+        currentPosition.y + relativePos.y
+      );
+
+      // Only add if not already present
+      if (!obstacles.contains(absolutePos)) {
+        obstacles.add(absolutePos);
+        if (DEBUG) {
+          logger.fine(
+            String.format(
+              "Added obstacle at (%d,%d) [relative: (%d,%d)]",
+              absolutePos.x,
+              absolutePos.y,
+              relativePos.x,
+              relativePos.y
+            )
+          );
+        }
+      }
+    }
   }
 
   public void addGoal(Point relativePos) {
     addEntity(EntityType.GOAL, null, relativePos);
-  }
-
-  // Coordinate conversion
-  private Point toAbsolutePosition(Point relativePos) {
-    return new Point(
-      currentPosition.x + relativePos.x,
-      currentPosition.y + relativePos.y
-    );
-  }
-
-  private Point toRelativePosition(Point absolutePos) {
-    return new Point(
-      absolutePos.x - currentPosition.x,
-      absolutePos.y - currentPosition.y
-    );
   }
 
   // Query methods for external search algorithms
@@ -282,8 +299,17 @@ public class LocalMap {
     int range,
     EntityType type
   ) {
+    // Ensure center is in absolute coordinates
+    Point absoluteCenter = new Point(
+      currentPosition.x + center.x,
+      currentPosition.y + center.y
+    );
+
     Set<Point> result = new HashSet<>();
-    Set<String> entitiesInRange = spatialGrid.getEntitiesInRange(center, range);
+    Set<String> entitiesInRange = spatialGrid.getEntitiesInRange(
+      absoluteCenter,
+      range
+    );
 
     for (String entityId : entitiesInRange) {
       Entity entity = entityRegistry.get(entityId);
@@ -332,57 +358,121 @@ public class LocalMap {
   @Override
   public String toString() {
     StringBuilder sb = new StringBuilder();
-    sb
-      .append("LocalMap State for position: ")
-      .append(currentPosition)
-      .append("\n");
+    sb.append("=== LocalMap State ===\n");
 
-    // List all dispensers with their types
-    Map<String, Entity> dispensers = typeIndex.get(EntityType.DISPENSER);
-    sb.append("Dispensers (").append(dispensers.size()).append("):\n");
-    dispensers
+    // Current position with coordinates
+    sb.append(
+      String.format(
+        "Agent Position: (%d,%d)\n",
+        currentPosition.x,
+        currentPosition.y
+      )
+    );
+    sb.append("--------------------\n");
+
+    // Group entities by their X coordinate for better spatial understanding
+    Map<Integer, List<Entity>> dispensersByX = typeIndex
+      .get(EntityType.DISPENSER)
       .values()
       .stream()
       .filter(e -> !e.isStale())
+      .collect(Collectors.groupingBy(e -> e.position.x));
+
+    sb.append("Dispensers by column:\n");
+    dispensersByX
+      .entrySet()
+      .stream()
+      .sorted(Map.Entry.comparingByKey())
       .forEach(
-        e ->
-          sb
-            .append("  ")
-            .append(e.subType)
-            .append(" at ")
-            .append(e.position)
-            .append("\n")
+        entry -> {
+          sb.append(String.format("X=%d:\n", entry.getKey()));
+          entry
+            .getValue()
+            .stream()
+            .sorted((e1, e2) -> Integer.compare(e1.position.y, e2.position.y))
+            .forEach(
+              e ->
+                sb.append(
+                  String.format("  %s at y=%d\n", e.subType, e.position.y)
+                )
+            );
+        }
       );
 
-    // List all blocks with their types
-    Map<String, Entity> blocks = typeIndex.get(EntityType.BLOCK);
-    sb.append("\nBlocks (").append(blocks.size()).append("):\n");
-    blocks
-      .values()
+    // Group obstacles by X coordinate
+    Map<Integer, List<Point>> obstaclesByX = obstacles
       .stream()
-      .filter(e -> !e.isStale())
+      .collect(Collectors.groupingBy(p -> p.x));
+
+    sb.append("\nObstacles by column:\n");
+    obstaclesByX
+      .entrySet()
+      .stream()
+      .sorted(Map.Entry.comparingByKey())
       .forEach(
-        e ->
-          sb
-            .append("  ")
-            .append(e.subType)
-            .append(" at ")
-            .append(e.position)
-            .append("\n")
+        entry -> {
+          sb.append(String.format("X=%d: ", entry.getKey()));
+          String yValues = entry
+            .getValue()
+            .stream()
+            .map(p -> String.valueOf(p.y))
+            .sorted()
+            .collect(Collectors.joining(", "));
+          sb.append(String.format("y=[%s]\n", yValues));
+        }
       );
 
-    // List all obstacles
-    sb.append("\nObstacles (").append(obstacles.size()).append("):\n");
-    obstacles.forEach(pos -> sb.append("  ").append(pos).append("\n"));
-
-    // List all goals
-    Map<String, Entity> goals = typeIndex.get(EntityType.GOAL);
-    sb.append("\nGoals (").append(goals.size()).append("):\n");
-    goals
+    // Goals grouped by X coordinate
+    Map<Integer, List<Entity>> goalsByX = typeIndex
+      .get(EntityType.GOAL)
       .values()
       .stream()
       .filter(e -> !e.isStale())
-      .forEach(e -> sb.append("  ").append(e.position).append("\n"));
+      .collect(Collectors.groupingBy(e -> e.position.x));
+
+    sb.append("\nGoals by column:\n");
+    goalsByX
+      .entrySet()
+      .stream()
+      .sorted(Map.Entry.comparingByKey())
+      .forEach(
+        entry -> {
+          sb.append(String.format("X=%d: ", entry.getKey()));
+          String yValues = entry
+            .getValue()
+            .stream()
+            .map(e -> String.valueOf(e.position.y))
+            .sorted()
+            .collect(Collectors.joining(", "));
+          sb.append(String.format("y=[%s]\n", yValues));
+        }
+      );
+
+    // Add statistics
+    sb.append("\nStatistics:\n");
+    sb.append(
+      String.format(
+        "Total Dispensers: %d\n",
+        typeIndex
+          .get(EntityType.DISPENSER)
+          .values()
+          .stream()
+          .filter(e -> !e.isStale())
+          .count()
+      )
+    );
+    sb.append(String.format("Total Obstacles: %d\n", obstacles.size()));
+    sb.append(
+      String.format(
+        "Total Goals: %d\n",
+        typeIndex
+          .get(EntityType.GOAL)
+          .values()
+          .stream()
+          .filter(e -> !e.isStale())
+          .count()
+      )
+    );
 
     return sb.toString();
   }
