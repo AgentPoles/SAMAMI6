@@ -11,8 +11,9 @@ public abstract class Movement {
   );
   protected static final String[] DIRECTIONS = { "n", "s", "e", "w" };
   protected final Random random = new Random();
-  protected LocalMap localMap;
+  protected final Map<String, LocalMap> agentMaps;
 
+  // Pre-compute direction opposites for O(1) lookup
   protected static final Map<String, String> OPPOSITE_DIRECTIONS = new HashMap<>(
     4
   ) {
@@ -25,18 +26,33 @@ public abstract class Movement {
     }
   };
 
-  public Movement(LocalMap localMap) {
-    this.localMap = localMap;
+  // Movement status constants
+  protected static final String FAILED_PATH = "failed_path";
+  protected static final String FAILED_FORBIDDEN = "failed_forbidden";
+  protected static final String FAILED_PARAMETER = "failed_parameter";
+
+  public Movement(Map<String, LocalMap> agentMaps) {
+    this.agentMaps = agentMaps;
   }
 
-  protected Point getCurrentPosition() {
-    if (localMap != null) {
-      return localMap.getCurrentPosition();
+  protected LocalMap getAgentMap(String agName) {
+    LocalMap map = agentMaps.get(agName);
+    if (map == null) {
+      throw new IllegalStateException("No map found for agent: " + agName);
     }
-    logger.warning(
-      "Using default getCurrentPosition without LocalMap. Position might be inaccurate."
-    );
-    return new Point(0, 0);
+    return map;
+  }
+
+  protected Point getCurrentPosition(String agName) {
+    try {
+      LocalMap map = getAgentMap(agName);
+      return map.getCurrentPosition();
+    } catch (Exception e) {
+      logger.warning(
+        "Error getting position for agent " + agName + ": " + e.getMessage()
+      );
+      return new Point(0, 0);
+    }
   }
 
   protected List<String> getPerpendicularDirections(String direction) {
@@ -63,4 +79,39 @@ public abstract class Movement {
       (direction.equals("n") && targetY < 0)
     );
   }
+
+  protected Point calculateNewPosition(Point current, String direction) {
+    switch (direction.toLowerCase()) {
+      case "n":
+        return new Point(current.x, current.y - 1);
+      case "s":
+        return new Point(current.x, current.y + 1);
+      case "e":
+        return new Point(current.x + 1, current.y);
+      case "w":
+        return new Point(current.x - 1, current.y);
+      default:
+        return current;
+    }
+  }
+
+  protected String getRandomDirection() {
+    return DIRECTIONS[random.nextInt(DIRECTIONS.length)];
+  }
+
+  protected String getOppositeDirection(String direction) {
+    return OPPOSITE_DIRECTIONS.get(direction);
+  }
+
+  // Make these abstract methods that subclasses must implement
+  public abstract void recordSuccess(String agName);
+
+  public abstract void recordFailure(
+    String agName,
+    String direction,
+    String failureType
+  );
+
+  protected abstract boolean isValidMove(String agName, String direction);
+  // ... rest of the existing Movement class code ...
 }

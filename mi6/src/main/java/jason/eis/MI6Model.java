@@ -172,42 +172,18 @@ public class MI6Model {
   }
 
   public boolean moveTowards(String agName, String direction) throws Exception {
-    LocalMap map = getAgentMap(agName);
-    Point oldPosition = map.getCurrentPosition();
-
     try {
-      if (LocalMap.DEBUG) {
-        logger.info(
-          String.format(
-            "[%s] Attempting to move %s from position %s",
-            agName,
-            direction,
-            oldPosition
-          )
-        );
-      }
-
-      Action move = new Action("move", new Identifier(direction.toLowerCase()));
-      ei.performAction(agName, move); // Try the move first
-
-      // Only update position if move succeeded
+      ei.performAction(
+        agName,
+        new Action("move", new Identifier(direction.toLowerCase()))
+      );
+      // Update the local map position after successful movement
+      LocalMap map = getAgentMap(agName);
       map.updatePositionFromMovement(direction);
       randomMovement.recordSuccess(agName);
-
-      if (LocalMap.DEBUG) {
-        logger.info(
-          String.format(
-            "[%s] Successfully moved %s to position %s",
-            agName,
-            direction,
-            map.getCurrentPosition()
-          )
-        );
-      }
-
+      logMapState(agName); // Log state after successful move
       return true;
     } catch (Exception e) {
-      // Position doesn't need to be reverted since we never updated it
       return handleMoveFailure(agName, direction, e);
     }
   }
@@ -240,6 +216,7 @@ public class MI6Model {
     if (errorMsg != null && errorMsg.toLowerCase().contains("forbidden")) {
       // Handle forbidden move
       randomMovement.recordFailure(agName, direction, "failed_forbidden");
+      logMapState(agName); // Log state after failed move
       return false;
     }
 
@@ -649,138 +626,90 @@ public class MI6Model {
     return perpDirs;
   }
 
-  private PerceptCache parsePercepts(String agName) throws Exception {
-    PerceptCache cached = perceptCache.get(agName);
-    if (cached != null && cached.isValid()) {
-      return cached;
-    }
-
-    Point position = null;
-    BitSet obstacles = new BitSet(4);
-    LocalMap localMap = getAgentMap(agName);
-
-    Map<String, Collection<Percept>> percepts = ei.getAllPercepts(agName);
-    if (percepts != null) {
-      for (Collection<Percept> perceptList : percepts.values()) {
-        updateLocalMapWithPercepts(agName, perceptList);
-
-        for (Percept p : perceptList) {
-          if ("position".equals(p.getName())) {
-            Parameter[] params = p.getParameters().toArray(new Parameter[0]);
-            position =
-              new Point(
-                ((Numeral) params[0]).getValue().intValue(),
-                ((Numeral) params[1]).getValue().intValue()
-              );
-            localMap.updatePosition(position);
-          }
-        }
+  public void processPercepts(String agName, Collection<Percept> percepts) {
+    try {
+      if (!agentMaps.containsKey(agName)) {
+        initializeAgent(agName);
       }
-    }
 
-    PerceptCache newCache = new PerceptCache(
-      position != null ? position : new Point(0, 0),
-      obstacles
-    );
-    perceptCache.put(agName, newCache);
-    return newCache;
-  }
-
-  public void updateLocalMapWithPercepts(
-    String agName,
-    Collection<Percept> percepts
-  ) {
-    // Auto-initialize agent if not already initialized
-    if (!agentMaps.containsKey(agName)) {
-      if (LocalMap.DEBUG) {
-        logger.info(String.format("[%s] Auto-initializing agent", agName));
-      }
-      initializeAgent(agName);
-    }
-
-    LocalMap map = getAgentMap(agName);
-
-    for (Percept p : percepts) {
-      if ("thing".equals(p.getName())) {
-        Parameter[] params = p.getParameters().toArray(new Parameter[0]);
-        int x = ((Numeral) params[0]).getValue().intValue();
-        int y = ((Numeral) params[1]).getValue().intValue();
-        String type = ((Identifier) params[2]).getValue();
-        String details = params.length > 3
-          ? ((Identifier) params[3]).getValue()
-          : null;
-
-        Point relativePos = new Point(x, y);
-
-        switch (type) {
-          case "dispenser":
-            if (details != null) {
-              map.addDispenser(relativePos, details);
-            }
-            break;
-          case "block":
-            if (details != null) {
-              map.addBlock(relativePos, details);
-            }
-            break;
-          case "obstacle":
-            map.addObstacle(relativePos);
-            break;
-        }
-      } else if ("goal".equals(p.getName())) {
-        Parameter[] params = p.getParameters().toArray(new Parameter[0]);
-        int x = ((Numeral) params[0]).getValue().intValue();
-        int y = ((Numeral) params[1]).getValue().intValue();
-        map.addGoal(new Point(x, y));
-      }
-    }
-    logMapState(agName);
-  }
-
-  public void addPercept(String agName, Literal percept) {
-    if (percept.getFunctor().equals("find_nearest_dispenser")) {
-      System.out.println(
-        "Handling find_nearest_dispenser for agent: " + agName
-      );
       LocalMap map = getAgentMap(agName);
 
-      List<Point> dispensersB0 = map.findNearestDispenser("b0");
-      List<Point> dispensersB1 = map.findNearestDispenser("b1");
+      // Use sets to deduplicate percepts
+      Set<Percept> uniquePercepts = new LinkedHashSet<>(percepts);
 
-      System.out.println("Dispensers B0: " + dispensersB0);
-      System.out.println("Dispensers B1: " + dispensersB1);
+      // Process all percepts
+      for (Percept p : uniquePercepts) {
+        String name = p.getName();
+        Parameter[] params = p.getParameters().toArray(new Parameter[0]);
 
-      Point nearest = null;
-      String type = "";
-
-      if (!dispensersB0.isEmpty()) {
-        nearest = dispensersB0.get(0);
-        type = "b0";
-      } else if (!dispensersB1.isEmpty()) {
-        nearest = dispensersB1.get(0);
-        type = "b1";
+        switch (name) {
+          case "thing":
+            processThingPercept(agName, p);
+            break;
+          case "obstacle":
+            int obstX = ((Numeral) params[0]).getValue().intValue();
+            int obstY = ((Numeral) params[1]).getValue().intValue();
+            map.addObstacle(new Point(obstX, obstY));
+            break;
+          case "goal":
+            int goalX = ((Numeral) params[0]).getValue().intValue();
+            int goalY = ((Numeral) params[1]).getValue().intValue();
+            map.addGoal(new Point(goalX, goalY));
+            break;
+        }
       }
 
-      if (nearest != null) {
-        List<String> path = map.findPathTo(nearest);
-        System.out.println("Path to nearest dispenser: " + path);
-        // addBelief(
-        //   agName,
-        //   Literal.parseLiteral(
-        //     String.format(
-        //       "find_nearest_dispenser(%s,%s)",
-        //       type,
-        //       ListTermImpl.parseList(path.toString())
-        //     )
-        //   )
-        // );
-      } else {
-        System.out.println("No dispenser found for agent " + agName);
-        // addBelief(
-        //   agName,
-        //   Literal.parseLiteral("find_nearest_dispenser(none,[])")
-        // );
+      map.clearStaleEntities();
+    } catch (Exception e) {
+      logger.log(Level.WARNING, "Error processing percepts for " + agName, e);
+    }
+  }
+
+  private void processThingPercept(String agName, Percept p) {
+    try {
+      Parameter[] params = p.getParameters().toArray(new Parameter[0]);
+      int relX = ((Numeral) params[0]).getValue().intValue();
+      int relY = ((Numeral) params[1]).getValue().intValue();
+      String type = ((Identifier) params[2]).getValue();
+      String details = params.length > 3
+        ? ((Identifier) params[3]).getValue()
+        : null;
+
+      LocalMap map = getAgentMap(agName);
+      Point relativePos = new Point(relX, relY);
+
+      if (LocalMap.DEBUG) {
+        logger.info(
+          String.format(
+            "[%s] Processing thing: %s at (%d,%d) [abs: %s] with details %s",
+            agName,
+            type,
+            relX,
+            relY,
+            map.getCurrentPosition(),
+            details
+          )
+        );
       }
+
+      switch (type) {
+        case "dispenser":
+          if (
+            details != null && (details.equals("b0") || details.equals("b1"))
+          ) {
+            map.addDispenser(relativePos, details);
+          }
+          break;
+        case "block":
+          if (
+            details != null && (details.equals("b0") || details.equals("b1"))
+          ) {
+            map.addBlock(relativePos, details);
+          }
+          break;
+      }
+    } catch (Exception e) {
+      logger.warning("Error processing thing percept: " + e.getMessage());
     }
   }
 
@@ -830,16 +759,20 @@ public class MI6Model {
 
   public void logMapState(String agName) {
     if (LocalMap.DEBUG) {
-      LocalMap map = getAgentMap(agName);
-      logger.info("Map state for agent " + agName + ":\n" + map.toString());
-    }
-  }
-
-  public void processPercepts(String agName, Collection<Percept> percepts) {
-    try {
-      updateLocalMapWithPercepts(agName, percepts);
-    } catch (Exception e) {
-      logger.log(Level.WARNING, "Error processing percepts", e);
+      try {
+        LocalMap map = getAgentMap(agName);
+        logger.info(
+          "\n=== Map State for Agent " +
+          agName +
+          " ===\n" +
+          map.toString() +
+          "\n================================"
+        );
+      } catch (Exception e) {
+        logger.warning(
+          "Failed to log map state for agent " + agName + ": " + e.getMessage()
+        );
+      }
     }
   }
 }

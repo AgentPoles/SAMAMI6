@@ -1,6 +1,5 @@
 package jason.eis;
 
-import eis.iilang.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
@@ -10,114 +9,143 @@ public class LocalMap {
   private static final Logger logger = Logger.getLogger(
     LocalMap.class.getName()
   );
+  private static final int CELL_SIZE = 8; // Power of 2 for efficient division
+  private static final int STALE_THRESHOLD = 30000; // 30 seconds in milliseconds
+  public static boolean DEBUG = true;
 
-  // Constants for map boundaries
-  private static final int MAP_SIZE = 100; // Assumed maximum map size
-  private static final int VIEW_DISTANCE = 5; // Maximum view distance
+  // Current position tracking
+  private Point currentPosition;
+  private Point lastRelativePosition;
 
-  // Position tracking
-  private Point currentPosition; // Current absolute position
-  private Point lastRelativePosition; // Last relative position from percepts
+  // Efficient spatial indexing
+  private final SpatialGrid spatialGrid;
 
-  // Separate mappings for specific types and combined
-  private final Map<String, Set<MapEntity>> dispensersB0;
-  private final Map<String, Set<MapEntity>> dispensersB1;
-  private final Map<String, Set<MapEntity>> allDispensers;
-  private final Map<String, Set<MapEntity>> blocksB0;
-  private final Map<String, Set<MapEntity>> blocksB1;
-  private final Map<String, Set<MapEntity>> allBlocks;
+  // Type-based indexing for quick entity type access
+  private final Map<EntityType, Map<String, Entity>> typeIndex;
 
-  private final Set<MapEntity> obstacles;
-  private final Set<MapEntity> goals;
-  private final Map<Point, MapEntity> entityMap; // For quick position-based lookups
+  // Entity registry for quick entity lookup by ID
+  private final Map<String, Entity> entityRegistry;
 
-  // Cache for pathfinding
-  private final Map<Point, List<String>> pathCache;
-  private static final int PATH_CACHE_SIZE = 100;
-  private static final long PATH_CACHE_DURATION = 5000; // 5 seconds
+  private final Set<Point> obstacles;
 
-  // Add movement history tracking (only used when DEBUG is true)
-  private final List<String> movementHistory;
-  private static final int MAX_MOVEMENT_HISTORY = 50; // Keep last 50 moves
+  public enum EntityType {
+    DISPENSER,
+    BLOCK,
+    OBSTACLE,
+    GOAL,
+  }
 
-  private static final int DUPLICATE_TOLERANCE = 1; // Consider entities within 1 unit as potential duplicates
-  private static final long PERCEPTION_WINDOW = 500; // Time window in milliseconds for same perception
-
-  public static boolean DEBUG = true; // Default to false
-
-  // Inner class to represent entities with timestamp
-  private static class MapEntity {
-    final Point position;
-    final String type;
-    final String subType; // b0 or b1
+  private static class Entity {
+    final String id;
+    final EntityType type;
+    final String subType; // b0/b1 for blocks/dispensers
+    Point position;
     long lastSeen;
 
-    MapEntity(Point position, String type, String subType) {
-      this.position = position;
+    Entity(String id, EntityType type, String subType, Point position) {
+      this.id = id;
       this.type = type;
       this.subType = subType;
-      this.lastSeen = System.currentTimeMillis();
+      this.position = position;
+      this.lastSeen = System.nanoTime();
     }
 
-    void updateTimestamp() {
-      this.lastSeen = System.currentTimeMillis();
+    void updatePosition(Point newPos) {
+      this.position = newPos;
+      this.lastSeen = System.nanoTime();
     }
 
     boolean isStale() {
-      return System.currentTimeMillis() - lastSeen > 30000; // 30 seconds
+      return (System.nanoTime() - lastSeen) / 1_000_000 > STALE_THRESHOLD;
     }
 
     @Override
     public boolean equals(Object o) {
       if (this == o) return true;
-      if (!(o instanceof MapEntity)) return false;
-      MapEntity other = (MapEntity) o;
-      return (
-        position.equals(other.position) &&
-        type.equals(other.type) &&
-        Objects.equals(subType, other.subType)
-      );
+      if (!(o instanceof Entity)) return false;
+      Entity other = (Entity) o;
+      return id.equals(other.id);
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(position, type, subType);
+      return id.hashCode();
+    }
+  }
+
+  private static class SpatialGrid {
+    private final Map<Long, Set<String>> grid = new ConcurrentHashMap<>();
+
+    private long hashPos(Point p) {
+      // Combine x,y into single long for efficient grid lookup
+      // Shift by CELL_SIZE (8) for efficient cell division
+      return ((long) (p.x >> 3) << 32) | ((p.y >> 3) & 0xFFFFFFFFL);
+    }
+
+    void add(Point p, String entityId) {
+      grid
+        .computeIfAbsent(hashPos(p), k -> ConcurrentHashMap.newKeySet())
+        .add(entityId);
+    }
+
+    void remove(Point p, String entityId) {
+      Set<String> cell = grid.get(hashPos(p));
+      if (cell != null) {
+        cell.remove(entityId);
+        if (cell.isEmpty()) {
+          grid.remove(hashPos(p));
+        }
+      }
+    }
+
+    void move(Point oldPos, Point newPos, String entityId) {
+      remove(oldPos, entityId);
+      add(newPos, entityId);
+    }
+
+    Set<String> getEntitiesInRange(Point center, int range) {
+      Set<String> result = ConcurrentHashMap.newKeySet();
+      int gridRange = (range + CELL_SIZE - 1) / CELL_SIZE;
+
+      for (int x = -gridRange; x <= gridRange; x++) {
+        for (int y = -gridRange; y <= gridRange; y++) {
+          Point p = new Point(center.x + (x << 3), center.y + (y << 3));
+          Set<String> cell = grid.get(hashPos(p));
+          if (cell != null) {
+            result.addAll(cell);
+          }
+        }
+      }
+      return result;
     }
   }
 
   public LocalMap() {
-    // Start at origin
+    this.obstacles = new HashSet<>();
     this.currentPosition = new Point(0, 0);
     this.lastRelativePosition = new Point(0, 0);
+    this.spatialGrid = new SpatialGrid();
+    this.typeIndex = new EnumMap<>(EntityType.class);
+    this.entityRegistry = new ConcurrentHashMap<>();
 
-    // Initialize type-specific collections
-    this.dispensersB0 = new ConcurrentHashMap<>();
-    this.dispensersB1 = new ConcurrentHashMap<>();
-    this.allDispensers = new ConcurrentHashMap<>();
-    this.blocksB0 = new ConcurrentHashMap<>();
-    this.blocksB1 = new ConcurrentHashMap<>();
-    this.allBlocks = new ConcurrentHashMap<>();
-
-    this.obstacles = Collections.newSetFromMap(new ConcurrentHashMap<>());
-    this.goals = Collections.newSetFromMap(new ConcurrentHashMap<>());
-    this.entityMap = new ConcurrentHashMap<>();
-    this.pathCache = new ConcurrentHashMap<>();
-    this.movementHistory = new ArrayList<>();
+    // Initialize type index
+    for (EntityType type : EntityType.values()) {
+      typeIndex.put(type, new ConcurrentHashMap<>());
+    }
   }
 
+  // Position management
   public Point getCurrentPosition() {
     return new Point(currentPosition.x, currentPosition.y);
   }
 
   public void updatePosition(Point newPosition) {
     if (DEBUG) {
-      logger.info(
+      logger.fine(
         String.format(
-          "Updating position - Current: (%d,%d), LastRel: (%d,%d), NewRel: (%d,%d)",
+          "Updating position from (%d,%d) to (%d,%d)",
           currentPosition.x,
           currentPosition.y,
-          lastRelativePosition.x,
-          lastRelativePosition.y,
           newPosition.x,
           newPosition.y
         )
@@ -131,18 +159,6 @@ public class LocalMap {
     // Update absolute position
     currentPosition = new Point(currentPosition.x + dx, currentPosition.y + dy);
     lastRelativePosition = newPosition;
-
-    if (DEBUG) {
-      logger.info(
-        String.format(
-          "Position updated - New absolute: (%d,%d), Movement: (%d,%d)",
-          currentPosition.x,
-          currentPosition.y,
-          dx,
-          dy
-        )
-      );
-    }
   }
 
   public void updatePositionFromMovement(String direction) {
@@ -162,944 +178,186 @@ public class LocalMap {
     }
 
     if (DEBUG) {
-      // Add to movement history
-      String moveEntry = String.format(
-        "Move %s: (%d,%d)",
-        direction,
-        currentPosition.x,
-        currentPosition.y
-      );
-      movementHistory.add(moveEntry);
-
-      // Keep history size manageable
-      if (movementHistory.size() > MAX_MOVEMENT_HISTORY) {
-        movementHistory.remove(0);
-      }
-
-      logger.info(
-        "Updated position to " + currentPosition + " after moving " + direction
+      logger.fine(
+        String.format(
+          "Updated position to (%d,%d) after moving %s",
+          currentPosition.x,
+          currentPosition.y,
+          direction
+        )
       );
     }
   }
 
-  /**
-   * Converts a relative position from percepts to absolute position
-   * Takes into account our current position relative to origin
-   */
-  private Point toAbsolutePosition(Point relativePos) {
-    Point absolutePos = new Point(
-      currentPosition.x + relativePos.x,
-      currentPosition.y + relativePos.y
-    );
+  // Entity management
+  private String generateEntityId(EntityType type, Point pos) {
+    return String.format("%s_%d_%d_%d", type, pos.x, pos.y, System.nanoTime());
+  }
+
+  private void addEntity(EntityType type, String subType, Point relativePos) {
+    Point absolutePos = toAbsolutePosition(relativePos);
+    String entityId = generateEntityId(type, absolutePos);
+
+    // Create new entity
+    Entity entity = new Entity(entityId, type, subType, absolutePos);
+
+    // Update all indexes atomically
+    entityRegistry.put(entityId, entity);
+    typeIndex.get(type).put(entityId, entity);
+    spatialGrid.add(absolutePos, entityId);
 
     if (DEBUG) {
-      logger.info(
+      logger.fine(
         String.format(
-          "Converting position - Relative: (%d,%d), Current: (%d,%d), Absolute: (%d,%d)",
-          relativePos.x,
-          relativePos.y,
-          currentPosition.x,
-          currentPosition.y,
+          "Added %s entity at (%d,%d)",
+          type,
           absolutePos.x,
           absolutePos.y
         )
       );
     }
-
-    return absolutePos;
   }
 
-  /**
-   * Processes and adds new observations to the map
-   */
-  public void addObservation(Collection<Percept> percepts) {
-    // Clear old entities that are in view range but not seen
-    clearOldEntitiesInView();
-
-    if (DEBUG) {
-      logger.info("=== Starting new percepts batch ===");
-      // Log all percepts for debugging
-      for (Percept p : percepts) {
-        logger.info("Raw percept: " + p.toString());
-      }
-    }
-
-    // Then process things (including obstacles)
-    for (Percept p : percepts) {
-      if ("thing".equals(p.getName())) {
-        Parameter[] params = p.getParameters().toArray(new Parameter[0]);
-        int relX = ((Numeral) params[0]).getValue().intValue();
-        int relY = ((Numeral) params[1]).getValue().intValue();
-        String type = ((Identifier) params[2]).getValue();
-        String subType = params.length > 3
-          ? ((Identifier) params[3]).getValue()
-          : null;
-
-        if (DEBUG) {
-          logger.info(
-            String.format(
-              "Thing percept details - X: %d, Y: %d, Type: '%s', SubType: '%s'",
-              relX,
-              relY,
-              type,
-              subType
-            )
-          );
-        }
-
-        Point relativePos = new Point(relX, relY);
-
-        if ("obstacle".equals(type)) {
-          if (DEBUG) {
-            logger.info("Found obstacle! Adding to map...");
-          }
-          addObstacle(relativePos);
-        } else if ("dispenser".equals(type)) {
-          addDispenser(relativePos, subType);
-        } else if ("block".equals(type)) {
-          addBlock(relativePos, subType);
-        }
-      }
-    }
-
-    // First process terrain (including goals)
-    for (Percept p : percepts) {
-      if ("terrain".equals(p.getName())) {
-        if (DEBUG) {
-          logger.info("Processing terrain percept: " + p);
-        }
-        Parameter param = p.getParameters().get(0);
-        if (param instanceof Function) {
-          Function terrainFunc = (Function) param;
-          if ("goal".equals(terrainFunc.getName())) {
-            // Process goal terrain
-            ParameterList goals = (ParameterList) terrainFunc
-              .getParameters()
-              .get(0);
-            for (Parameter goalParam : goals) {
-              ParameterList coords = (ParameterList) goalParam;
-              int relX = ((Numeral) coords.get(0)).getValue().intValue();
-              int relY = ((Numeral) coords.get(1)).getValue().intValue();
-              Point relativePos = new Point(relX, relY);
-              addGoal(relativePos);
-              if (DEBUG) {
-                logger.info(
-                  String.format(
-                    "Added goal at relative position (%d,%d)",
-                    relX,
-                    relY
-                  )
-                );
-              }
-            }
-          }
-        }
-      }
-    }
+  // Public API for adding entities
+  public void addDispenser(Point relativePos, String subType) {
+    addEntity(EntityType.DISPENSER, subType, relativePos);
   }
 
-  /**
-   * Processes individual percepts
-   */
-  private void processPercept(Percept percept) {
-    String name = percept.getName();
-    Parameter[] params = percept.getParameters().toArray(new Parameter[0]);
-
-    // Get coordinates which are always the first two parameters
-    int relX = ((Numeral) params[0]).getValue().intValue();
-    int relY = ((Numeral) params[1]).getValue().intValue();
-    Point relativePos = new Point(relX, relY);
-    Point absolutePos = toAbsolutePosition(relativePos);
-
-    if ("thing".equals(name)) {
-      String type = ((Identifier) params[2]).getValue();
-      String subType = params.length > 3
-        ? ((Identifier) params[3]).getValue()
-        : null;
-
-      MapEntity entity = new MapEntity(absolutePos, type, subType);
-
-      switch (type) {
-        case "dispenser":
-          if ("b0".equals(subType)) {
-            updateEntitySet(dispensersB0, entity);
-          } else if ("b1".equals(subType)) {
-            updateEntitySet(dispensersB1, entity);
-          }
-          updateEntitySet(allDispensers, entity);
-          break;
-        case "block":
-          if ("b0".equals(subType)) {
-            updateEntitySet(blocksB0, entity);
-          } else if ("b1".equals(subType)) {
-            updateEntitySet(blocksB1, entity);
-          }
-          updateEntitySet(allBlocks, entity);
-          break;
-        case "obstacle":
-          updateSimpleEntitySet(obstacles, entity);
-          break;
-      }
-      entityMap.put(absolutePos, entity);
-    } else if ("goal".equals(name)) {
-      MapEntity entity = new MapEntity(absolutePos, "goal", null);
-      updateSimpleEntitySet(goals, entity);
-      entityMap.put(absolutePos, entity);
-
-      if (DEBUG) {
-        logger.info(
-          String.format(
-            "Added goal at relative (%d,%d) -> absolute (%d,%d)",
-            relX,
-            relY,
-            absolutePos.x,
-            absolutePos.y
-          )
-        );
-      }
-    }
+  public void addBlock(Point relativePos, String subType) {
+    addEntity(EntityType.BLOCK, subType, relativePos);
   }
 
-  /**
-   * Updates an entity set with new observation, considering both position and timing
-   */
-  private void updateEntitySet(
-    Map<String, Set<MapEntity>> map,
-    MapEntity newEntity
+  public void addObstacle(Point position) {
+    obstacles.add(position);
+  }
+
+  public void addGoal(Point relativePos) {
+    addEntity(EntityType.GOAL, null, relativePos);
+  }
+
+  // Coordinate conversion
+  private Point toAbsolutePosition(Point relativePos) {
+    return new Point(
+      currentPosition.x + relativePos.x,
+      currentPosition.y + relativePos.y
+    );
+  }
+
+  private Point toRelativePosition(Point absolutePos) {
+    return new Point(
+      absolutePos.x - currentPosition.x,
+      absolutePos.y - currentPosition.y
+    );
+  }
+
+  // Query methods for external search algorithms
+  public Set<Point> getEntitiesInRange(
+    Point center,
+    int range,
+    EntityType type
   ) {
-    Set<MapEntity> entities = map.computeIfAbsent(
-      newEntity.type,
-      k -> Collections.newSetFromMap(new ConcurrentHashMap<>())
-    );
+    Set<Point> result = new HashSet<>();
+    Set<String> entitiesInRange = spatialGrid.getEntitiesInRange(center, range);
 
-    // First, check for exact position matches
-    Optional<MapEntity> exactMatch = entities
-      .stream()
-      .filter(
-        existing ->
-          existing.position.x == newEntity.position.x &&
-          existing.position.y == newEntity.position.y &&
-          existing.subType.equals(newEntity.subType)
-      )
-      .findFirst();
-
-    if (exactMatch.isPresent()) {
-      // Update timestamp of exact match
-      exactMatch.get().updateTimestamp();
-      if (DEBUG) {
-        logger.info(
-          String.format(
-            "Updated timestamp for existing %s at (%d,%d)",
-            newEntity.type,
-            newEntity.position.x,
-            newEntity.position.y
-          )
-        );
-      }
-      return;
-    }
-
-    // Check for nearby entities that might be duplicates
-    Set<MapEntity> nearbyEntities = entities
-      .stream()
-      .filter(
-        existing -> {
-          int dx = Math.abs(existing.position.x - newEntity.position.x);
-          int dy = Math.abs(existing.position.y - newEntity.position.y);
-          long timeDiff = Math.abs(existing.lastSeen - newEntity.lastSeen);
-
-          // Consider it a duplicate if:
-          // 1. It's within tolerance
-          // 2. It's the same type
-          // 3. It was seen very recently
-          return (
-            dx <= DUPLICATE_TOLERANCE &&
-            dy <= DUPLICATE_TOLERANCE &&
-            existing.subType.equals(newEntity.subType) &&
-            timeDiff < PERCEPTION_WINDOW
-          );
-        }
-      )
-      .collect(Collectors.toSet());
-
-    if (nearbyEntities.isEmpty()) {
-      // No duplicates found, add as new entity
-      if (DEBUG) {
-        logger.info(
-          String.format(
-            "Adding new %s at (%d,%d) [Current pos: (%d,%d)]",
-            newEntity.type,
-            newEntity.position.x,
-            newEntity.position.y,
-            currentPosition.x,
-            currentPosition.y
-          )
-        );
-      }
-      entities.add(newEntity);
-    } else {
-      // Found potential duplicate(s)
-      // Log all nearby entities for debugging
-      if (DEBUG) {
-        logger.info(
-          String.format(
-            "Found %d nearby %s entities near (%d,%d):",
-            nearbyEntities.size(),
-            newEntity.type,
-            newEntity.position.x,
-            newEntity.position.y
-          )
-        );
-        for (MapEntity nearby : nearbyEntities) {
-          logger.info(
-            String.format(
-              "  - At (%d,%d), seen %d ms ago",
-              nearby.position.x,
-              nearby.position.y,
-              System.currentTimeMillis() - nearby.lastSeen
-            )
-          );
-        }
-      }
-
-      // If multiple nearby entities exist, they're probably distinct
-      if (nearbyEntities.size() > 1) {
-        if (DEBUG) {
-          logger.info("Multiple nearby entities found, treating as new entity");
-        }
-        entities.add(newEntity);
-      } else {
-        // Single nearby entity, update its position
-        MapEntity existing = nearbyEntities.iterator().next();
-        if (DEBUG) {
-          logger.info(
-            String.format(
-              "Updating position of existing %s from (%d,%d) to (%d,%d)",
-              existing.type,
-              existing.position.x,
-              existing.position.y,
-              newEntity.position.x,
-              newEntity.position.y
-            )
-          );
-        }
-        entities.remove(existing);
-        entities.add(newEntity);
+    for (String entityId : entitiesInRange) {
+      Entity entity = entityRegistry.get(entityId);
+      if (entity != null && entity.type == type && !entity.isStale()) {
+        result.add(entity.position);
       }
     }
-  }
-
-  /**
-   * Clears entities that should be in view but weren't observed
-   */
-  private void clearOldEntitiesInView() {
-    Point pos = currentPosition;
-    for (int x = -VIEW_DISTANCE; x <= VIEW_DISTANCE; x++) {
-      for (int y = -VIEW_DISTANCE; y <= VIEW_DISTANCE; y++) {
-        Point checkPos = new Point(pos.x + x, pos.y + y);
-        MapEntity entity = entityMap.get(checkPos);
-        if (entity != null && entity.isStale()) {
-          removeEntity(entity);
-        }
-      }
-    }
-  }
-
-  /**
-   * Removes an entity from all collections
-   */
-  private void removeEntity(MapEntity entity) {
-    entityMap.remove(entity.position);
-    obstacles.remove(entity);
-    goals.remove(entity);
-
-    for (Set<MapEntity> dispenserSet : dispensersB0.values()) {
-      dispenserSet.remove(entity);
-    }
-    for (Set<MapEntity> dispenserSet : dispensersB1.values()) {
-      dispenserSet.remove(entity);
-    }
-    for (Set<MapEntity> blockSet : blocksB0.values()) {
-      blockSet.remove(entity);
-    }
-    for (Set<MapEntity> blockSet : blocksB1.values()) {
-      blockSet.remove(entity);
-    }
-  }
-
-  /**
-   * Finds the nearest dispenser of a specific type
-   */
-  public List<Point> findNearestDispenser(String type) {
-    Map<String, Set<MapEntity>> sourceMap;
-    if (type == null) {
-      sourceMap = allDispensers;
-    } else if ("b0".equals(type)) {
-      sourceMap = dispensersB0;
-    } else if ("b1".equals(type)) {
-      sourceMap = dispensersB1;
-    } else {
-      return Collections.emptyList();
-    }
-
-    return findNearest(sourceMap);
-  }
-
-  /**
-   * Finds the nearest block of a specific type
-   */
-  public List<Point> findNearestBlock(String type) {
-    Map<String, Set<MapEntity>> sourceMap;
-    if (type == null) {
-      sourceMap = allBlocks;
-    } else if ("b0".equals(type)) {
-      sourceMap = blocksB0;
-    } else if ("b1".equals(type)) {
-      sourceMap = blocksB1;
-    } else {
-      return Collections.emptyList();
-    }
-
-    return findNearest(sourceMap);
-  }
-
-  private List<Point> findNearest(Map<String, Set<MapEntity>> entityMap) {
-    List<Point> nearest = new ArrayList<>();
-    double minDistance = Double.MAX_VALUE;
-
-    for (Set<MapEntity> entities : entityMap.values()) {
-      for (MapEntity entity : entities) {
-        if (entity.isStale()) continue;
-
-        double distance = getDistance(currentPosition, entity.position);
-        if (distance < minDistance) {
-          minDistance = distance;
-          nearest.clear();
-          nearest.add(entity.position);
-        } else if (distance == minDistance) {
-          nearest.add(entity.position);
-        }
-      }
-    }
-
-    return nearest;
-  }
-
-  /**
-   * Calculates Manhattan distance between two points
-   */
-  private double getDistance(Point a, Point b) {
-    return Math.sqrt(Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2));
-  }
-
-  /**
-   * Finds a path to the target position
-   */
-  public List<String> findPathTo(Point target) {
-    // Check cache first
-    String cacheKey = currentPosition + "->" + target;
-    List<String> cachedPath = pathCache.get(target);
-    if (cachedPath != null) {
-      return new ArrayList<>(cachedPath);
-    }
-
-    // Implement A* pathfinding
-    List<String> path = findPathAStar(target);
-
-    // Cache the result
-    if (pathCache.size() >= PATH_CACHE_SIZE) {
-      // Remove oldest entry
-      pathCache.remove(pathCache.keySet().iterator().next());
-    }
-    pathCache.put(target, new ArrayList<>(path));
-
-    return path;
-  }
-
-  /**
-   * Implements A* pathfinding algorithm
-   */
-  private List<String> findPathAStar(Point target) {
-    PriorityQueue<Node> openSet = new PriorityQueue<>();
-    Set<Point> closedSet = new HashSet<>();
-    Map<Point, Node> nodeMap = new HashMap<>();
-
-    Node start = new Node(
-      currentPosition,
-      null,
-      0,
-      getDistance(currentPosition, target)
-    );
-    openSet.add(start);
-    nodeMap.put(currentPosition, start);
-
-    while (!openSet.isEmpty()) {
-      Node current = openSet.poll();
-
-      if (current.position.equals(target)) {
-        return reconstructPath(current);
-      }
-
-      closedSet.add(current.position);
-
-      // Check all four directions
-      for (Direction dir : Direction.values()) {
-        Point nextPos = new Point(
-          current.position.x + dir.dx,
-          current.position.y + dir.dy
-        );
-
-        if (closedSet.contains(nextPos) || isObstacle(nextPos)) {
-          continue;
-        }
-
-        double newG = current.g + 1;
-        Node neighbor = nodeMap.get(nextPos);
-
-        if (neighbor == null) {
-          neighbor =
-            new Node(nextPos, current, newG, getDistance(nextPos, target));
-          nodeMap.put(nextPos, neighbor);
-          openSet.add(neighbor);
-        } else if (newG < neighbor.g) {
-          neighbor.parent = current;
-          neighbor.g = newG;
-          neighbor.f = newG + neighbor.h;
-          openSet.remove(neighbor);
-          openSet.add(neighbor);
-        }
-      }
-    }
-
-    return Collections.emptyList(); // No path found
-  }
-
-  private boolean isObstacle(Point p) {
-    MapEntity entity = entityMap.get(p);
-    return entity != null && "obstacle".equals(entity.type);
-  }
-
-  private List<String> reconstructPath(Node end) {
-    List<String> path = new ArrayList<>();
-    Node current = end;
-    Node parent = current.parent;
-
-    while (parent != null) {
-      int dx = current.position.x - parent.position.x;
-      int dy = current.position.y - parent.position.y;
-
-      if (dx == 1) path.add(0, "e"); else if (dx == -1) path.add(
-        0,
-        "w"
-      ); else if (dy == 1) path.add(0, "s"); else if (dy == -1) path.add(
-        0,
-        "n"
-      );
-
-      current = parent;
-      parent = current.parent;
-    }
-
-    return path;
-  }
-
-  private void clearStaleCache() {
-    long now = System.currentTimeMillis();
-    pathCache
-      .entrySet()
-      .removeIf(
-        entry -> now - entry.getValue().get(0).hashCode() > PATH_CACHE_DURATION
-      );
-  }
-
-  // Helper classes for pathfinding
-  private static class Node implements Comparable<Node> {
-    Point position;
-    Node parent;
-    double g; // Cost from start to current
-    double h; // Estimated cost to goal
-    double f; // g + h
-
-    Node(Point position, Node parent, double g, double h) {
-      this.position = position;
-      this.parent = parent;
-      this.g = g;
-      this.h = h;
-      this.f = g + h;
-    }
-
-    @Override
-    public int compareTo(Node other) {
-      return Double.compare(this.f, other.f);
-    }
-  }
-
-  private enum Direction {
-    NORTH(0, -1), // Correct: north decrements y
-    SOUTH(0, 1), // Correct: south increments y
-    EAST(1, 0), // Correct: east increments x
-    WEST(-1, 0); // Correct: west decrements x
-
-    final int dx;
-    final int dy;
-
-    Direction(int dx, int dy) {
-      this.dx = dx;
-      this.dy = dy;
-    }
-  }
-
-  // Getters for map information
-  public Point getAbsolutePosition() {
-    return new Point(currentPosition.x, currentPosition.y);
-  }
-
-  public Set<Point> getObstacles() {
-    return obstacles
-      .stream()
-      .map(entity -> entity.position)
-      .collect(Collectors.toSet());
-  }
-
-  public Set<Point> getGoals() {
-    return goals
-      .stream()
-      .map(entity -> entity.position)
-      .collect(Collectors.toSet());
-  }
-
-  public Map<String, Set<Point>> getDispensers() {
-    Map<String, Set<Point>> result = new HashMap<>();
-    dispensersB0.forEach(
-      (type, entities) ->
-        result.put(
-          type,
-          entities
-            .stream()
-            .map(entity -> entity.position)
-            .collect(Collectors.toSet())
-        )
-    );
-    dispensersB1.forEach(
-      (type, entities) ->
-        result.put(
-          type,
-          entities
-            .stream()
-            .map(entity -> entity.position)
-            .collect(Collectors.toSet())
-        )
-    );
     return result;
   }
 
-  public Map<String, Set<Point>> getBlocks() {
-    Map<String, Set<Point>> result = new HashMap<>();
-    blocksB0.forEach(
-      (type, entities) ->
-        result.put(
-          type,
-          entities
-            .stream()
-            .map(entity -> entity.position)
-            .collect(Collectors.toSet())
-        )
-    );
-    blocksB1.forEach(
-      (type, entities) ->
-        result.put(
-          type,
-          entities
-            .stream()
-            .map(entity -> entity.position)
-            .collect(Collectors.toSet())
-        )
-    );
-    return result;
+  public Set<Point> getEntitiesOfType(EntityType type, String subType) {
+    return typeIndex
+      .get(type)
+      .values()
+      .stream()
+      .filter(
+        e -> !e.isStale() && (subType == null || subType.equals(e.subType))
+      )
+      .map(e -> e.position)
+      .collect(Collectors.toSet());
+  }
+
+  // Maintenance
+  public void clearStaleEntities() {
+    Set<String> staleEntities = entityRegistry
+      .values()
+      .stream()
+      .filter(Entity::isStale)
+      .map(e -> e.id)
+      .collect(Collectors.toSet());
+
+    for (String entityId : staleEntities) {
+      Entity entity = entityRegistry.get(entityId);
+      if (entity != null) {
+        entityRegistry.remove(entityId);
+        typeIndex.get(entity.type).remove(entityId);
+        spatialGrid.remove(entity.position, entityId);
+      }
+    }
+  }
+
+  public boolean isObstacle(Point position) {
+    return obstacles.contains(position);
   }
 
   @Override
   public String toString() {
     StringBuilder sb = new StringBuilder();
-    sb.append("LocalMap:\n");
+    sb
+      .append("LocalMap State for position: ")
+      .append(currentPosition)
+      .append("\n");
 
-    // Dispensers with relative coordinates
-    sb.append("Dispensers (Absolute -> Relative):\n");
-    for (Map.Entry<String, Set<MapEntity>> entry : dispensersB0.entrySet()) {
-      for (MapEntity entity : entry.getValue()) {
-        Point relativePos = toRelativePosition(entity.position);
-        sb.append(
-          String.format(
-            "  Location: abs(%d,%d) -> rel(%d,%d), Type: b0\n",
-            entity.position.x,
-            entity.position.y,
-            relativePos.x,
-            relativePos.y
-          )
-        );
-      }
-    }
-    for (Map.Entry<String, Set<MapEntity>> entry : dispensersB1.entrySet()) {
-      for (MapEntity entity : entry.getValue()) {
-        Point relativePos = toRelativePosition(entity.position);
-        sb.append(
-          String.format(
-            "  Location: abs(%d,%d) -> rel(%d,%d), Type: b1\n",
-            entity.position.x,
-            entity.position.y,
-            relativePos.x,
-            relativePos.y
-          )
-        );
-      }
-    }
-
-    // Blocks
-    sb.append("Blocks:\n");
-    for (Map.Entry<String, Set<MapEntity>> entry : blocksB0.entrySet()) {
-      for (MapEntity entity : entry.getValue()) {
-        Point relativePos = toRelativePosition(entity.position);
-        sb.append(
-          String.format(
-            "  Location: abs(%d,%d) -> rel(%d,%d), Type: b0\n",
-            entity.position.x,
-            entity.position.y,
-            relativePos.x,
-            relativePos.y
-          )
-        );
-      }
-    }
-    for (Map.Entry<String, Set<MapEntity>> entry : blocksB1.entrySet()) {
-      for (MapEntity entity : entry.getValue()) {
-        Point relativePos = toRelativePosition(entity.position);
-        sb.append(
-          String.format(
-            "  Location: abs(%d,%d) -> rel(%d,%d), Type: b1\n",
-            entity.position.x,
-            entity.position.y,
-            relativePos.x,
-            relativePos.y
-          )
-        );
-      }
-    }
-
-    // Obstacles with relative coordinates
-    sb.append("Obstacles (Absolute -> Relative):\n");
-    for (MapEntity entity : obstacles) {
-      Point relativePos = toRelativePosition(entity.position);
-      sb.append(
-        String.format(
-          "  Location: abs(%d,%d) -> rel(%d,%d)\n",
-          entity.position.x,
-          entity.position.y,
-          relativePos.x,
-          relativePos.y
-        )
+    // List all dispensers with their types
+    Map<String, Entity> dispensers = typeIndex.get(EntityType.DISPENSER);
+    sb.append("Dispensers (").append(dispensers.size()).append("):\n");
+    dispensers
+      .values()
+      .stream()
+      .filter(e -> !e.isStale())
+      .forEach(
+        e ->
+          sb
+            .append("  ")
+            .append(e.subType)
+            .append(" at ")
+            .append(e.position)
+            .append("\n")
       );
-    }
 
-    // Goals with relative coordinates
-    sb.append("Goals (Absolute -> Relative):\n");
-    for (MapEntity entity : goals) {
-      Point relativePos = toRelativePosition(entity.position);
-      sb.append(
-        String.format(
-          "  Location: abs(%d,%d) -> rel(%d,%d)\n",
-          entity.position.x,
-          entity.position.y,
-          relativePos.x,
-          relativePos.y
-        )
+    // List all blocks with their types
+    Map<String, Entity> blocks = typeIndex.get(EntityType.BLOCK);
+    sb.append("\nBlocks (").append(blocks.size()).append("):\n");
+    blocks
+      .values()
+      .stream()
+      .filter(e -> !e.isStale())
+      .forEach(
+        e ->
+          sb
+            .append("  ")
+            .append(e.subType)
+            .append(" at ")
+            .append(e.position)
+            .append("\n")
       );
-    }
 
-    // Current Position
-    if (currentPosition != null) {
-      sb.append(
-        String.format(
-          "Current Position: (%d,%d)\n",
-          currentPosition.x,
-          currentPosition.y
-        )
-      );
-    }
+    // List all obstacles
+    sb.append("\nObstacles (").append(obstacles.size()).append("):\n");
+    obstacles.forEach(pos -> sb.append("  ").append(pos).append("\n"));
+
+    // List all goals
+    Map<String, Entity> goals = typeIndex.get(EntityType.GOAL);
+    sb.append("\nGoals (").append(goals.size()).append("):\n");
+    goals
+      .values()
+      .stream()
+      .filter(e -> !e.isStale())
+      .forEach(e -> sb.append("  ").append(e.position).append("\n"));
 
     return sb.toString();
-  }
-
-  /**
-   * Convert absolute position to relative position from current position
-   */
-  private Point toRelativePosition(Point absolutePos) {
-    // Calculate relative coordinates from current position
-    Point relativePos = new Point(
-      absolutePos.x - currentPosition.x, // X: difference in x
-      absolutePos.y - currentPosition.y // Y: difference in y (south is positive)
-    );
-
-    if (DEBUG) {
-      logger.info(
-        String.format(
-          "Converting absolute (%d,%d) to relative (%d,%d) from current pos (%d,%d)",
-          absolutePos.x,
-          absolutePos.y,
-          relativePos.x,
-          relativePos.y,
-          currentPosition.x,
-          currentPosition.y
-        )
-      );
-    }
-
-    return relativePos;
-  }
-
-  public void addDispenser(Point relativePos, String type) {
-    Point absolutePos = toAbsolutePosition(relativePos);
-    MapEntity entity = new MapEntity(absolutePos, "dispenser", type);
-
-    if (type.equals("b0")) {
-      updateEntitySet(dispensersB0, entity);
-    } else if (type.equals("b1")) {
-      updateEntitySet(dispensersB1, entity);
-    }
-    updateEntitySet(allDispensers, entity);
-
-    // Only update entityMap if it's a new entity
-    if (!entityMap.containsKey(absolutePos)) {
-      entityMap.put(absolutePos, entity);
-    }
-  }
-
-  public void addBlock(Point relativePos, String type) {
-    Point absolutePos = toAbsolutePosition(relativePos);
-    MapEntity entity = new MapEntity(absolutePos, "block", type);
-
-    if (type.equals("b0")) {
-      updateEntitySet(blocksB0, entity);
-    } else if (type.equals("b1")) {
-      updateEntitySet(blocksB1, entity);
-    }
-    updateEntitySet(allBlocks, entity);
-
-    // Only update entityMap if it's a new entity
-    if (!entityMap.containsKey(absolutePos)) {
-      entityMap.put(absolutePos, entity);
-    }
-  }
-
-  /**
-   * Updates a simple entity set with new observation, considering both position and timing
-   */
-  private void updateSimpleEntitySet(
-    Set<MapEntity> entities,
-    MapEntity newEntity
-  ) {
-    // First, check for exact position matches
-    Optional<MapEntity> exactMatch = entities
-      .stream()
-      .filter(
-        existing ->
-          existing.position.x == newEntity.position.x &&
-          existing.position.y == newEntity.position.y
-      )
-      .findFirst();
-
-    if (exactMatch.isPresent()) {
-      // Update timestamp of exact match
-      exactMatch.get().updateTimestamp();
-      if (DEBUG) {
-        logger.info(
-          String.format(
-            "Updated timestamp for existing %s at (%d,%d)",
-            newEntity.type,
-            newEntity.position.x,
-            newEntity.position.y
-          )
-        );
-      }
-      return;
-    }
-
-    // Check for nearby entities that might be duplicates
-    Set<MapEntity> nearbyEntities = entities
-      .stream()
-      .filter(
-        existing -> {
-          int dx = Math.abs(existing.position.x - newEntity.position.x);
-          int dy = Math.abs(existing.position.y - newEntity.position.y);
-          long timeDiff = Math.abs(existing.lastSeen - newEntity.lastSeen);
-
-          return (
-            dx <= DUPLICATE_TOLERANCE &&
-            dy <= DUPLICATE_TOLERANCE &&
-            timeDiff < PERCEPTION_WINDOW
-          );
-        }
-      )
-      .collect(Collectors.toSet());
-
-    if (nearbyEntities.isEmpty()) {
-      if (DEBUG) {
-        logger.info(
-          String.format(
-            "Adding new %s at (%d,%d) [Current pos: (%d,%d)]",
-            newEntity.type,
-            newEntity.position.x,
-            newEntity.position.y,
-            currentPosition.x,
-            currentPosition.y
-          )
-        );
-      }
-      entities.add(newEntity);
-    } else if (nearbyEntities.size() == 1) {
-      // Single nearby entity, update its position
-      MapEntity existing = nearbyEntities.iterator().next();
-      if (DEBUG) {
-        logger.info(
-          String.format(
-            "Updating position of existing %s from (%d,%d) to (%d,%d)",
-            existing.type,
-            existing.position.x,
-            existing.position.y,
-            newEntity.position.x,
-            newEntity.position.y
-          )
-        );
-      }
-      entities.remove(existing);
-      entities.add(newEntity);
-    } else {
-      // Multiple nearby entities, treat as new
-      if (DEBUG) {
-        logger.info("Multiple nearby entities found, treating as new entity");
-      }
-      entities.add(newEntity);
-    }
-  }
-
-  public void addObstacle(Point relativePos) {
-    Point absolutePos = toAbsolutePosition(relativePos);
-    MapEntity entity = new MapEntity(absolutePos, "obstacle", null);
-
-    updateSimpleEntitySet(obstacles, entity);
-
-    if (!entityMap.containsKey(absolutePos)) {
-      entityMap.put(absolutePos, entity);
-    }
-  }
-
-  public void addGoal(Point relativePos) {
-    Point absolutePos = toAbsolutePosition(relativePos);
-    MapEntity entity = new MapEntity(absolutePos, "goal", null);
-
-    updateSimpleEntitySet(goals, entity);
-
-    if (!entityMap.containsKey(absolutePos)) {
-      entityMap.put(absolutePos, entity);
-    }
   }
 }

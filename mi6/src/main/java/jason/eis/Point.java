@@ -1,5 +1,7 @@
 package jason.eis;
 
+import java.util.Objects;
+
 public class Point {
   public final int x, y;
   private final int hashCode;
@@ -7,7 +9,7 @@ public class Point {
   public Point(int x, int y) {
     this.x = x;
     this.y = y;
-    this.hashCode = 31 * x + y;
+    this.hashCode = Objects.hash(x, y);
   }
 
   @Override
@@ -18,8 +20,13 @@ public class Point {
   @Override
   public boolean equals(Object o) {
     if (this == o) return true;
-    if (!(o instanceof Point)) return false;
-    Point p = (Point) o;
-    return x == p.x && y == p.y;
+    if (o == null || getClass() != o.getClass()) return false;
+    Point point = (Point) o;
+    return x == point.x && y == point.y;
+  }
+
+  @Override
+  public String toString() {
+    return String.format("(%d,%d)", x, y);
   }
 }

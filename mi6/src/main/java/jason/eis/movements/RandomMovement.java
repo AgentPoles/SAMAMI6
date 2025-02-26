@@ -5,7 +5,10 @@ import jason.eis.LocalMap;
 import jason.eis.Point;
 import jason.eis.Zone;
 import java.util.*;
+import java.util.BitSet;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 public class RandomMovement extends Movement {
   private static final int STUCK_THRESHOLD = 3;
@@ -13,6 +16,23 @@ public class RandomMovement extends Movement {
   private static final double RANDOM_ESCAPE_PROBABILITY = 0.4;
   private static final String FAILED_FORBIDDEN = "failed_forbidden";
   private static final int MAX_FAILURES_PER_DIRECTION = 3;
+  private static final int DIRECTION_CACHE_SIZE = 10;
+
+  // Core constants for movement optimization
+  private static final String[] DIRECTIONS = { "n", "s", "e", "w" };
+  private static final Map<String, Integer> DIRECTION_INDEX = new HashMap<>(4) {
+
+    {
+      put("n", 0);
+      put("s", 1);
+      put("e", 2);
+      put("w", 3);
+    }
+  };
+
+  // Movement tracking with efficient data structures
+  private final Map<String, MovementState> agentStates;
+  private final DirectionCache directionCache;
 
   // Movement tracking
   private final Map<String, MovementHistory> agentMovement = new HashMap<>();
@@ -81,11 +101,89 @@ public class RandomMovement extends Movement {
   }
 
   public RandomMovement(Map<String, LocalMap> agentMaps) {
-    super(null);
+    super(agentMaps);
     this.agentMaps = agentMaps;
+    this.agentStates = new ConcurrentHashMap<>();
+    this.directionCache = new DirectionCache(DIRECTION_CACHE_SIZE);
   }
 
-  @Override
+  // Efficient state tracking per agent
+  private static class MovementState {
+    Point position;
+    int stuckCount;
+    byte[] directionFailures; // Using byte array instead of Map
+    BitSet boundaryDirections;
+    int escapeAttempts;
+    String lastFailedDirection;
+    long lastUpdateTime;
+
+    MovementState() {
+      position = new Point(0, 0);
+      stuckCount = 0;
+      directionFailures = new byte[4]; // One for each direction
+      boundaryDirections = new BitSet(4);
+      escapeAttempts = 0;
+      lastUpdateTime = System.nanoTime();
+    }
+
+    void recordFailure(String direction) {
+      int dirIndex = DIRECTION_INDEX.get(direction);
+      if (directionFailures[dirIndex] < Byte.MAX_VALUE) {
+        directionFailures[dirIndex]++;
+      }
+      lastFailedDirection = direction;
+    }
+
+    void recordSuccess() {
+      Arrays.fill(directionFailures, (byte) 0);
+      lastFailedDirection = null;
+    }
+
+    boolean isDirectionSafe(String direction) {
+      return (
+        directionFailures[DIRECTION_INDEX.get(direction)] <
+        MAX_FAILURES_PER_DIRECTION
+      );
+    }
+  }
+
+  // Cache recent successful directions
+  private static class DirectionCache {
+    private final String[] directions;
+    private final Point[] positions;
+    private int index;
+    private final int size;
+
+    DirectionCache(int size) {
+      this.size = size;
+      this.directions = new String[size];
+      this.positions = new Point[size];
+      this.index = 0;
+    }
+
+    void add(String direction, Point position) {
+      directions[index] = direction;
+      positions[index] = position;
+      index = (index + 1) % size;
+    }
+
+    String getBestDirection(Point currentPos) {
+      for (int i = 0; i < size; i++) {
+        if (
+          positions[i] != null &&
+          (
+            Math.abs(positions[i].x - currentPos.x) +
+            Math.abs(positions[i].y - currentPos.y)
+          ) <
+          5
+        ) {
+          return directions[i];
+        }
+      }
+      return null;
+    }
+  }
+
   protected Point getCurrentPosition() {
     logger.warning("Called getCurrentPosition without agent name");
     return new Point(0, 0);
@@ -102,84 +200,132 @@ public class RandomMovement extends Movement {
 
   public String chooseBestDirection(String agName, int targetX, int targetY) {
     try {
+      MovementState state = getAgentState(agName);
       Point currentPos = getCurrentPosition(agName);
-      MovementHistory history = agentMovement.computeIfAbsent(
-        agName,
-        k -> new MovementHistory()
-      );
 
-      if (currentPos.equals(history.lastPosition)) {
-        if (++history.stuckCount >= STUCK_THRESHOLD) {
-          String escapeDir = handleStuckAgent(agName, history.lastFailure);
-          if (escapeDir != null) return escapeDir;
+      // Check cache first for quick decision
+      String cachedDirection = directionCache.getBestDirection(currentPos);
+      if (cachedDirection != null && isValidMove(agName, cachedDirection)) {
+        return cachedDirection;
+      }
+
+      // Handle stuck detection
+      if (currentPos.equals(state.position)) {
+        if (++state.stuckCount >= STUCK_THRESHOLD) {
+          return handleStuckAgent(agName, state);
         }
       } else {
-        history.stuckCount = 0;
-        history.lastPosition = currentPos;
+        state.position = currentPos;
+        state.stuckCount = 0;
       }
 
-      DirectionInfo dirInfo = analyzeDirections(agName, targetX, targetY);
-      String zoneDir = handleZoneExploration(agName, dirInfo.allSafe);
-      if (zoneDir != null) return zoneDir;
-
-      if (!dirInfo.safeTowardsTarget.isEmpty()) {
-        return dirInfo.safeTowardsTarget.get(0);
-      }
-
-      return getRandomSafeDirection(dirInfo.allSafe);
+      // Get optimal direction based on target
+      return calculateOptimalDirection(agName, state, targetX, targetY);
     } catch (Exception e) {
-      logger.warning("Error in chooseBestDirection: " + e.getMessage());
+      logger.warning("Error choosing direction: " + e.getMessage());
       return DIRECTIONS[random.nextInt(DIRECTIONS.length)];
     }
   }
 
-  private String handleStuckAgent(String agName, String lastFailure) {
-    MovementHistory history = agentMovement.get(agName);
-    if (history == null) return null;
-
-    DirectionInfo dirInfo = analyzeDirections(agName, 0, 0);
-    List<String> safeDirections = new ArrayList<>(dirInfo.allSafe);
-    safeDirections.removeAll(history.boundaryDirections);
-
-    if (history.boundaryEscapeAttempts >= BOUNDARY_ESCAPE_ATTEMPTS) {
-      String escapeDir = forceBoundaryEscape(history, safeDirections);
-      if (escapeDir != null) {
-        history.clearBoundaryAttempts();
-        return escapeDir;
-      }
-    }
-
-    if (
-      random.nextDouble() < RANDOM_ESCAPE_PROBABILITY &&
-      !safeDirections.isEmpty()
-    ) {
-      return safeDirections.get(random.nextInt(safeDirections.size()));
-    }
-
-    if (FAILED_FORBIDDEN.equals(lastFailure)) {
-      history.recordBoundary(getLastAttemptedDirection(agName));
-      String oppositeDir = OPPOSITE_DIRECTIONS.get(
-        getLastAttemptedDirection(agName)
+  private String handleStuckAgent(String agName, MovementState state) {
+    // Try perpendicular direction first
+    if (state.lastFailedDirection != null) {
+      List<String> perpDirs = getPerpendicularDirections(
+        state.lastFailedDirection
       );
-      if (safeDirections.contains(oppositeDir)) {
-        return oppositeDir;
+      for (String dir : perpDirs) {
+        if (isValidMove(agName, dir)) {
+          return dir;
+        }
       }
     }
 
-    if (history.stuckCount > STUCK_THRESHOLD) {
-      String perpDir = getPerpendicularEscapeDirection(history, safeDirections);
-      if (perpDir != null) return perpDir;
+    // Random escape attempt
+    if (random.nextDouble() < RANDOM_ESCAPE_PROBABILITY) {
+      String[] safeDirs = Arrays
+        .stream(DIRECTIONS)
+        .filter(dir -> isValidMove(agName, dir))
+        .toArray(String[]::new);
+      if (safeDirs.length > 0) {
+        return safeDirs[random.nextInt(safeDirs.length)];
+      }
     }
 
-    return safeDirections
-      .stream()
-      .filter(dir -> !history.boundaryDirections.contains(dir))
+    // Default to least failed direction
+    return Arrays
+      .stream(DIRECTIONS)
+      .filter(dir -> isValidMove(agName, dir))
       .min(
         Comparator.comparingInt(
-          dir -> history.directionFailures.getOrDefault(dir, 0)
+          dir -> state.directionFailures[DIRECTION_INDEX.get(dir)]
         )
       )
-      .orElse(getRandomSafeDirection(safeDirections));
+      .orElse(DIRECTIONS[random.nextInt(DIRECTIONS.length)]);
+  }
+
+  private String calculateOptimalDirection(
+    String agName,
+    MovementState state,
+    int targetX,
+    int targetY
+  ) {
+    Point currentPos = getCurrentPosition(agName);
+    List<String> validDirs = Arrays
+      .stream(DIRECTIONS)
+      .filter(dir -> isValidMove(agName, dir))
+      .collect(Collectors.toList());
+
+    if (validDirs.isEmpty()) {
+      return DIRECTIONS[random.nextInt(DIRECTIONS.length)];
+    }
+
+    // Prefer directions towards target
+    return validDirs
+      .stream()
+      .filter(
+        dir ->
+          isTowardsTarget(dir, targetX - currentPos.x, targetY - currentPos.y)
+      )
+      .findFirst()
+      .orElse(validDirs.get(random.nextInt(validDirs.size())));
+  }
+
+  private String getLastAttemptedDirection(String agName) {
+    MovementState state = getAgentState(agName);
+    return state.lastFailedDirection != null
+      ? state.lastFailedDirection
+      : DIRECTIONS[0];
+  }
+
+  private MovementState getAgentState(String agName) {
+    return agentStates.computeIfAbsent(agName, k -> new MovementState());
+  }
+
+  protected boolean isValidMove(String agName, String direction) {
+    MovementState state = getAgentState(agName);
+    return (
+      state.isDirectionSafe(direction) &&
+      !state.boundaryDirections.get(DIRECTION_INDEX.get(direction))
+    );
+  }
+
+  public void recordSuccess(String agName) {
+    MovementState state = getAgentState(agName);
+    state.recordSuccess();
+    Point currentPos = getCurrentPosition(agName);
+    directionCache.add(getLastAttemptedDirection(agName), currentPos);
+  }
+
+  public void recordFailure(
+    String agName,
+    String direction,
+    String failureType
+  ) {
+    MovementState state = getAgentState(agName);
+    state.recordFailure(direction);
+    if (FAILED_FORBIDDEN.equals(failureType)) {
+      state.boundaryDirections.set(DIRECTION_INDEX.get(direction));
+    }
   }
 
   private String handleZoneExploration(
@@ -258,11 +404,6 @@ public class RandomMovement extends Movement {
     return null;
   }
 
-  private String getLastAttemptedDirection(String agName) {
-    MovementHistory history = agentMovement.get(agName);
-    return history != null ? history.lastFailure : "n";
-  }
-
   private String getPerpendicularEscapeDirection(
     MovementHistory history,
     List<String> safeDirections
@@ -289,24 +430,6 @@ public class RandomMovement extends Movement {
       agName,
       k -> new Zone(position.x / 10, position.y / 10)
     );
-  }
-
-  public void recordFailure(
-    String agName,
-    String direction,
-    String failureType
-  ) {
-    MovementHistory history = agentMovement.get(agName);
-    if (history != null) {
-      history.recordFailure(direction, failureType);
-    }
-  }
-
-  public void recordSuccess(String agName) {
-    MovementHistory history = agentMovement.get(agName);
-    if (history != null) {
-      history.recordSuccess();
-    }
   }
 
   private boolean shouldChangeZone(Zone zone, Point currentPos) {
