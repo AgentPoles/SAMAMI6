@@ -252,11 +252,17 @@ public class MI6Model {
               map.getCurrentPosition().y
             )
           );
+          logger.info("logging after successful move " + agName);
+          logMapState(agName); // Log after successful move
         }
 
         return true;
       } catch (Exception e) {
-        return handleMoveFailure(agName, direction, e);
+        boolean result = handleMoveFailure(agName, direction, e);
+        if (LocalMap.DEBUG) {
+          logMapState(agName); // Log after failed move
+        }
+        return result;
       }
     }
   }
@@ -746,7 +752,6 @@ public class MI6Model {
         }
 
         LocalMap map = getAgentMap(agName);
-        // Get current absolute position once for all percepts
         Point currentAbsPos = map.getCurrentPosition();
 
         for (Percept p : percepts) {
@@ -772,6 +777,11 @@ public class MI6Model {
 
         map.clearStaleEntities();
         lastProcessedTime.put(agName, currentTime);
+
+        if (LocalMap.DEBUG) {
+          logger.info("Processing percepts for " + agName);
+          logMapState(agName); // Log after processing percepts
+        }
       } catch (Exception e) {
         logger.log(Level.WARNING, "Error processing percepts for " + agName, e);
       }
