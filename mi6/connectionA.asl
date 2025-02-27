@@ -26,4 +26,5 @@ random_dir(DirList,RandomNumber,Dir) :- (RandomNumber <= 0.25 & .nth(0,DirList,D
 
 
 +!move_random : .random(RandomNumber) & random_dir([n,s,e,w],RandomNumber,Dir)
-<-	move(Dir).
+<-	move(Dir);
+    helpermodels.UpdateMovement(Dir).

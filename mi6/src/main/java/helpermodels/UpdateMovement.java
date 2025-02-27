@@ -3,7 +3,6 @@ package helpermodels;
 import jason.asSemantics.DefaultInternalAction;
 import jason.asSemantics.TransitionSystem;
 import jason.asSemantics.Unifier;
-import jason.asSyntax.StringTerm;
 import jason.asSyntax.Term;
 import jason.eis.MI6Model;
 
@@ -13,7 +12,7 @@ public class UpdateMovement extends DefaultInternalAction {
   public Object execute(TransitionSystem ts, Unifier un, Term[] terms)
     throws Exception {
     try {
-      String direction = ((StringTerm) terms[0]).getString().toLowerCase();
+      String direction = terms[0].toString().toLowerCase();
       String agName = ts.getUserAgArch().getAgName();
 
       MI6Model model = MI6Model.getInstance();

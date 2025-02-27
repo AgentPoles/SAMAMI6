@@ -249,32 +249,25 @@ public class MI6Model {
         );
 
         // If we get here, move was successful
-        map.updatePositionFromMovement(direction);
+        // Note: Position update is now handled in ASL
         getDirectionStatus(agName, direction).recordSuccess();
 
-        if (LocalMap.DEBUG) {
+        if (DEBUG) {
           logger.info(
             String.format(
-              "[%s] Successfully moved %s from (%d,%d) to (%d,%d)",
+              "[%s] Successfully moved %s from (%d,%d)",
               agName,
               direction,
               currentPos.x,
-              currentPos.y,
-              map.getCurrentPosition().x,
-              map.getCurrentPosition().y
+              currentPos.y
             )
           );
-          logger.info("logging after successful move " + agName);
-          logMapState(agName); // Log after successful move
+          logMapState(agName);
         }
 
         return true;
       } catch (Exception e) {
-        boolean result = handleMoveFailure(agName, direction, e);
-        if (LocalMap.DEBUG) {
-          logMapState(agName); // Log after failed move
-        }
-        return result;
+        return handleMoveFailure(agName, direction, e);
       }
     }
   }

@@ -210,7 +210,7 @@ public class LocalMap {
       }
 
       if (DEBUG) {
-        logger.fine(
+        logger.info(
           String.format(
             "Moving %s: Updating position from (%d,%d) to (%d,%d)",
             direction,
