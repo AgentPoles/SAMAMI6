@@ -14,6 +14,9 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 public class MI6Model {
+  private static MI6Model instance;
+  public static boolean DEBUG = true; // Make DEBUG public static
+
   private final Logger logger = Logger.getLogger(
     "MI6Model." + MI6Model.class.getName()
   );
@@ -201,6 +204,23 @@ public class MI6Model {
 
     this.randomMovement = new RandomMovement(agentMaps);
     this.plannedMovement = new PlannedMovement(agentMaps);
+
+    instance = this;
+  }
+
+  public static synchronized MI6Model getInstance() {
+    if (instance == null) {
+      throw new IllegalStateException("MI6Model not initialized");
+    }
+    return instance;
+  }
+
+  public LocalMap getAgentMap(String agName) {
+    LocalMap map = agentMaps.get(agName);
+    if (map == null) {
+      throw new IllegalStateException("Agent " + agName + " not initialized");
+    }
+    return map;
   }
 
   public void initializeAgent(String agName) {
@@ -211,14 +231,6 @@ public class MI6Model {
         logger.info(String.format("[%s] Initialized new agent", agName));
       }
     }
-  }
-
-  private LocalMap getAgentMap(String agName) {
-    LocalMap map = agentMaps.get(agName);
-    if (map == null) {
-      throw new IllegalStateException("Agent " + agName + " not initialized");
-    }
-    return map;
   }
 
   public boolean moveTowards(String agName, String direction) throws Exception {

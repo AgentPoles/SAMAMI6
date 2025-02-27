@@ -90,7 +90,7 @@ public class EISAdapter extends Environment implements AgentListener {
 
       if (allPercepts != null) {
         for (Collection<Percept> ps : allPercepts.values()) {
-          model.processPercepts(agName, ps);
+          // model.processPercepts(agName, ps);
           percepts.addAll(perceptsToLiterals(ps));
         }
       }
