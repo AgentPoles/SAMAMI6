@@ -16,6 +16,9 @@ random_dir(DirList,RandomNumber,Dir) :- (RandomNumber <= 0.25 & .nth(0,DirList,D
 +thing(X,Y,dispenser,Detail)[source(percept)] : true <-
     helpermodels.AddDispenser(X, Y, Detail).
 
++thing(X,Y,entity,_)[source(percept)] : true <-
+    helpermodels.AddOtherAgents(X, Y).
+
 +step(X) : true <-
 	.print("Received step percept.").
 	
@@ -23,8 +26,10 @@ random_dir(DirList,RandomNumber,Dir) :- (RandomNumber <= 0.25 & .nth(0,DirList,D
 	.print("Determining my action");
 	!move_random.
 
++!move_random: attached(_,_) & ?helpermodels.RequestGuidance(dispenser,1,Dir)
+<-	move(Dir);
+    helpermodels.UpdateMovement(Dir).
 
-
-+!move_random : .random(RandomNumber) & random_dir([n,s,e,w],RandomNumber,Dir)
++!move_random: ?helpermodels.RequestGuidance(dispenser,1,Dir)
 <-	move(Dir);
     helpermodels.UpdateMovement(Dir).

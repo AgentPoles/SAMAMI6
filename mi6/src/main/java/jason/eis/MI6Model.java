@@ -190,6 +190,13 @@ public class MI6Model {
     }
   }
 
+  public enum MoveFailureType {
+    FORBIDDEN, // Out of grid bounds
+    FAILED_PATH, // Blocked by obstacle or other things
+    INVALID_PARAM, // Invalid direction
+    UNKNOWN, // Other failures
+  }
+
   public MI6Model(EnvironmentInterfaceStandard ei) {
     this.ei = ei;
     this.agentMaps = new ConcurrentHashMap<>();
@@ -233,41 +240,52 @@ public class MI6Model {
     }
   }
 
+  private MoveFailureType parseMoveFailure(Exception e) {
+    String message = e.getMessage().toLowerCase();
+
+    if (message.contains("failed_forbidden")) {
+      return MoveFailureType.FORBIDDEN;
+    } else if (message.contains("failed_path")) {
+      return MoveFailureType.FAILED_PATH;
+    } else if (message.contains("failed_parameter")) {
+      return MoveFailureType.INVALID_PARAM;
+    }
+
+    return MoveFailureType.UNKNOWN;
+  }
+
   public boolean moveTowards(String agName, String direction) throws Exception {
     synchronized (actionLock) {
       try {
         LocalMap map = getAgentMap(agName);
         Point currentPos = map.getCurrentPosition();
-
-        // Calculate expected new position before movement
         Point expectedPos = calculateTargetPosition(currentPos, direction);
 
-        // Perform the move action
         ei.performAction(
           agName,
           new Action("move", new Identifier(direction.toLowerCase()))
         );
 
-        // If we get here, move was successful
-        // Note: Position update is now handled in ASL
         getDirectionStatus(agName, direction).recordSuccess();
-
-        if (DEBUG) {
-          logger.info(
-            String.format(
-              "[%s] Successfully moved %s from (%d,%d)",
-              agName,
-              direction,
-              currentPos.x,
-              currentPos.y
-            )
-          );
-          logMapState(agName);
-        }
-
         return true;
       } catch (Exception e) {
-        return handleMoveFailure(agName, direction, e);
+        MoveFailureType failureType = parseMoveFailure(e);
+        LocalMap map = getAgentMap(agName);
+
+        // Only record boundary for FORBIDDEN failures
+        if (failureType == MoveFailureType.FORBIDDEN) {
+          map.recordBoundary(direction, map.getCurrentPosition());
+        }
+        // Record obstacles for FAILED_PATH
+        else if (failureType == MoveFailureType.FAILED_PATH) {
+          Point targetPos = calculateTargetPosition(
+            map.getCurrentPosition(),
+            direction
+          );
+          map.recordObstacle(targetPos);
+        }
+
+        return handleMoveFailure(agName, direction, e, failureType);
       }
     }
   }
@@ -281,42 +299,19 @@ public class MI6Model {
   private boolean handleMoveFailure(
     String agName,
     String direction,
-    Exception e
+    Exception e,
+    MoveFailureType failureType
   ) {
-    String errorMsg = e.getMessage();
-    LocalMap map = getAgentMap(agName);
-    Point failurePos = map.getCurrentPosition();
-    DirectionStatus dirStatus = getDirectionStatus(agName, direction);
+    getDirectionStatus(agName, direction).recordFailure();
 
-    // Categorize and handle the failure
-    String failureReason;
-    if (errorMsg != null && errorMsg.toLowerCase().contains("forbidden")) {
-      failureReason = "forbidden";
-      // Update map with potential obstacle at the target position
-      Point targetPos = calculateTargetPosition(failurePos, direction);
-      map.addObstacle(
-        new Point(targetPos.x - failurePos.x, targetPos.y - failurePos.y),
-        failurePos
-      );
-    } else if (errorMsg != null && errorMsg.toLowerCase().contains("invalid")) {
-      failureReason = "invalid_parameter";
-    } else {
-      failureReason = "unknown";
-    }
-
-    // Record the failure
-    dirStatus.recordFailure(direction, failureReason, failurePos);
-
-    if (LocalMap.DEBUG) {
+    if (DEBUG) {
       logger.warning(
         String.format(
-          "[%s] Move failed in direction %s at (%d,%d): %s (consecutive failures: %d)",
+          "[%s] Move %s failed (%s): %s",
           agName,
           direction,
-          failurePos.x,
-          failurePos.y,
-          failureReason,
-          dirStatus.consecutiveFailures
+          failureType,
+          e.getMessage()
         )
       );
     }

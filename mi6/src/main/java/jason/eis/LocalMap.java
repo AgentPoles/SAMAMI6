@@ -33,6 +33,26 @@ public class LocalMap {
   // Add debug tracking map
   private final Map<String, EntityDebugInfo> debugTrackingMap;
 
+  private final Map<Point, DynamicObstacle> dynamicObstacles = new ConcurrentHashMap<>();
+  private static final int DYNAMIC_OBSTACLE_TTL = 3000; // 3 seconds time-to-live
+  private static final int CRITICAL_DISTANCE = 2; // Distance where obstacles become critical to avoid
+  private static final int AWARENESS_DISTANCE = 4; // Max distance to track obstacles
+
+  private Point mapMinBounds = null;
+  private Point mapMaxBounds = null;
+  private boolean boundsInitialized = false;
+
+  // Boundary detection constants
+  private static final int MIN_BOUNDARY_CONFIRMATIONS = 3;
+  private final Map<String, Integer> boundaryConfirmations = new HashMap<>(); // Tracks how many times we've hit each boundary
+
+  private final Map<String, BoundaryEvidence> boundaryEvidence = new HashMap<>();
+  private static final int EVIDENCE_THRESHOLD = 3; // Number of confirmations needed
+
+  private final Map<String, BoundaryInfo> confirmedBoundaries = new HashMap<>();
+  private final Map<Point, ObstacleInfo> staticObstacles = new HashMap<>();
+  private final Map<Point, ObstacleInfo> dynamicObstacles = new HashMap<>();
+
   public enum EntityType {
     DISPENSER,
     BLOCK,
@@ -150,6 +170,86 @@ public class LocalMap {
         agentAbsPos.x,
         agentAbsPos.y
       );
+    }
+  }
+
+  private static class DynamicObstacle {
+    Point position;
+    Point velocity;
+    long lastSeen;
+    String type; // "agent", "block", etc.
+
+    DynamicObstacle(Point pos, String type) {
+      this.position = pos;
+      this.type = type;
+      this.lastSeen = System.currentTimeMillis();
+    }
+
+    void updatePosition(Point newPos) {
+      if (position != null) {
+        velocity = new Point(newPos.x - position.x, newPos.y - position.y);
+      }
+      position = newPos;
+      lastSeen = System.currentTimeMillis();
+    }
+
+    boolean isStale() {
+      return System.currentTimeMillis() - lastSeen > DYNAMIC_OBSTACLE_TTL;
+    }
+
+    Point predictPosition(int steps) {
+      if (velocity == null) return position;
+      return new Point(
+        position.x + (velocity.x * steps),
+        position.y + (velocity.y * steps)
+      );
+    }
+  }
+
+  private static class BoundaryEvidence {
+    int failedMoves = 0;
+    int continuousObstacles = 0;
+    Point lastConfirmedPosition = null;
+
+    void addFailedMove(Point position) {
+      failedMoves++;
+      lastConfirmedPosition = position;
+    }
+
+    void addObstacleEvidence(int count) {
+      continuousObstacles = Math.max(continuousObstacles, count);
+    }
+
+    boolean isBoundaryConfirmed() {
+      // Confirm boundary if either:
+      // 1. Multiple failed moves in same area
+      // 2. Long continuous line of obstacles at vision limit
+      return (
+        failedMoves >= EVIDENCE_THRESHOLD ||
+        continuousObstacles >= EVIDENCE_THRESHOLD
+      );
+    }
+  }
+
+  private static class BoundaryInfo {
+    Point position;
+    long confirmationTime;
+
+    BoundaryInfo(Point pos) {
+      this.position = pos;
+      this.confirmationTime = System.currentTimeMillis();
+    }
+  }
+
+  private static class ObstacleInfo {
+    long lastSeen;
+
+    ObstacleInfo() {
+      this.lastSeen = System.currentTimeMillis();
+    }
+
+    void updateSeen() {
+      this.lastSeen = System.currentTimeMillis();
     }
   }
 
@@ -419,7 +519,133 @@ public class LocalMap {
   }
 
   public boolean isObstacle(Point position) {
-    return obstacles.contains(position);
+    return (
+      staticObstacles.containsKey(position) ||
+      dynamicObstacles.containsKey(position)
+    );
+  }
+
+  public void updateDynamicObstacle(
+    Point relativePos,
+    String type,
+    Point currentPos
+  ) {
+    // Convert to absolute position
+    Point absPos = new Point(
+      currentPos.x + relativePos.x,
+      currentPos.y + relativePos.y
+    );
+
+    // Only track obstacles within awareness distance
+    if (
+      Math.abs(relativePos.x) > AWARENESS_DISTANCE ||
+      Math.abs(relativePos.y) > AWARENESS_DISTANCE
+    ) {
+      return;
+    }
+
+    // Update or add dynamic obstacle
+    dynamicObstacles.compute(
+      absPos,
+      (k, existing) -> {
+        if (existing == null) {
+          return new DynamicObstacle(absPos, type);
+        } else {
+          existing.updatePosition(absPos);
+          return existing;
+        }
+      }
+    );
+  }
+
+  public void clearStaleDynamicObstacles() {
+    dynamicObstacles.entrySet().removeIf(entry -> entry.getValue().isStale());
+  }
+
+  public boolean isDynamicObstacleInPath(Point from, Point to) {
+    clearStaleDynamicObstacles();
+
+    // Check current and predicted positions
+    for (DynamicObstacle obstacle : dynamicObstacles.values()) {
+      // Check current position
+      if (isPointInPath(obstacle.position, from, to)) {
+        return true;
+      }
+
+      // Check predicted positions (next 2 steps)
+      for (int step = 1; step <= 2; step++) {
+        Point predicted = obstacle.predictPosition(step);
+        if (isPointInPath(predicted, from, to)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private boolean isPointInPath(Point point, Point from, Point to) {
+    // Calculate if point is very close to the path
+    double distance = pointToLineDistance(point, from, to);
+    return distance < CRITICAL_DISTANCE;
+  }
+
+  private double pointToLineDistance(
+    Point point,
+    Point lineStart,
+    Point lineEnd
+  ) {
+    double normalLength = Math.sqrt(
+      (lineEnd.x - lineStart.x) *
+      (lineEnd.x - lineStart.x) +
+      (lineEnd.y - lineStart.y) *
+      (lineEnd.y - lineStart.y)
+    );
+
+    if (normalLength == 0.0) return euclideanDistance(point, lineStart);
+
+    double t = Math.max(
+      0,
+      Math.min(
+        1,
+        (
+          (point.x - lineStart.x) *
+          (lineEnd.x - lineStart.x) +
+          (point.y - lineStart.y) *
+          (lineEnd.y - lineStart.y)
+        ) /
+        (normalLength * normalLength)
+      )
+    );
+
+    Point projection = new Point(
+      (int) (lineStart.x + t * (lineEnd.x - lineStart.x)),
+      (int) (lineStart.y + t * (lineEnd.y - lineStart.y))
+    );
+
+    return euclideanDistance(point, projection);
+  }
+
+  private double euclideanDistance(Point p1, Point p2) {
+    return Math.sqrt(
+      (p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y)
+    );
+  }
+
+  public Map<Point, DynamicObstacle> getDynamicObstacles() {
+    clearStaleDynamicObstacles();
+    return new HashMap<>(dynamicObstacles);
+  }
+
+  public boolean isPathSafe(Point from, Point to) {
+    // Check static obstacles
+    if (hasObstacleInPath(from, to)) return false;
+
+    // Check dynamic obstacles only if they're close enough to matter
+    if (euclideanDistance(from, to) <= AWARENESS_DISTANCE) {
+      return !isDynamicObstacleInPath(from, to);
+    }
+
+    return true;
   }
 
   @Override
@@ -535,5 +761,359 @@ public class LocalMap {
     );
 
     return sb.toString();
+  }
+
+  public boolean isOutOfBounds(Point pos) {
+    // Check against confirmed boundaries
+    for (Map.Entry<String, BoundaryInfo> entry : confirmedBoundaries.entrySet()) {
+      String direction = entry.getKey();
+      Point boundary = entry.getValue().position;
+
+      switch (direction) {
+        case "n":
+          if (pos.y <= boundary.y) return true;
+          break;
+        case "s":
+          if (pos.y >= boundary.y) return true;
+          break;
+        case "w":
+          if (pos.x <= boundary.x) return true;
+          break;
+        case "e":
+          if (pos.x >= boundary.x) return true;
+          break;
+      }
+    }
+    return false;
+  }
+
+  public void updateBoundary(String direction, Point currentPos) {
+    // Increment confirmation count for this boundary
+    boundaryConfirmations.merge(direction, 1, Integer::sum);
+
+    // Only update bounds after multiple confirmations
+    if (boundaryConfirmations.get(direction) >= MIN_BOUNDARY_CONFIRMATIONS) {
+      if (!boundsInitialized) {
+        mapMinBounds = new Point(currentPos.x - 50, currentPos.y - 50); // Initial guess
+        mapMaxBounds = new Point(currentPos.x + 50, currentPos.y + 50);
+        boundsInitialized = true;
+      }
+
+      // Update specific boundary
+      switch (direction) {
+        case "n":
+          mapMinBounds = new Point(mapMinBounds.x, currentPos.y);
+          break;
+        case "s":
+          mapMaxBounds = new Point(mapMaxBounds.x, currentPos.y);
+          break;
+        case "w":
+          mapMinBounds = new Point(currentPos.x, mapMinBounds.y);
+          break;
+        case "e":
+          mapMaxBounds = new Point(currentPos.x, mapMaxBounds.y);
+          break;
+      }
+    }
+  }
+
+  public boolean isBoundaryConfirmed(String direction) {
+    return (
+      boundaryConfirmations.getOrDefault(direction, 0) >=
+      MIN_BOUNDARY_CONFIRMATIONS
+    );
+  }
+
+  public Point getMapMinBounds() {
+    return mapMinBounds;
+  }
+
+  public Point getMapMaxBounds() {
+    return mapMaxBounds;
+  }
+
+  public boolean areBoundsInitialized() {
+    return boundsInitialized;
+  }
+
+  public void detectBoundariesFromPercepts(
+    List<Percept> percepts,
+    Point currentPos
+  ) {
+    // Look for boundary percepts in the agent's vision
+    for (Percept percept : percepts) {
+      if (percept.getName().equals("obstacle")) {
+        // Get relative coordinates from percept
+        int relX = ((NumberTerm) percept.getParameters().get(0)).solve();
+        int relY = ((NumberTerm) percept.getParameters().get(1)).solve();
+
+        // Check if this might be a boundary
+        // Boundaries often appear as continuous lines of obstacles
+        checkForBoundaryPattern(relX, relY, currentPos);
+      }
+    }
+  }
+
+  private void checkForBoundaryPattern(int relX, int relY, Point currentPos) {
+    // Look for continuous lines of obstacles that might indicate boundaries
+    if (Math.abs(relX) == LocalMap.AWARENESS_DISTANCE) {
+      // Potential east/west boundary
+      String direction = relX > 0 ? "e" : "w";
+      updateBoundary(direction, new Point(currentPos.x + relX, currentPos.y));
+    }
+    if (Math.abs(relY) == LocalMap.AWARENESS_DISTANCE) {
+      // Potential north/south boundary
+      String direction = relY > 0 ? "s" : "n";
+      updateBoundary(direction, new Point(currentPos.x, currentPos.y + relY));
+    }
+  }
+
+  public Map<String, Point> getBoundaryDistances(Point currentPos) {
+    Map<String, Point> distances = new HashMap<>();
+
+    if (boundsInitialized) {
+      if (isBoundaryConfirmed("n")) distances.put(
+        "n",
+        new Point(0, currentPos.y - mapMinBounds.y)
+      );
+      if (isBoundaryConfirmed("s")) distances.put(
+        "s",
+        new Point(0, mapMaxBounds.y - currentPos.y)
+      );
+      if (isBoundaryConfirmed("w")) distances.put(
+        "w",
+        new Point(currentPos.x - mapMinBounds.x, 0)
+      );
+      if (isBoundaryConfirmed("e")) distances.put(
+        "e",
+        new Point(mapMaxBounds.x - currentPos.x, 0)
+      );
+    }
+
+    return distances;
+  }
+
+  public void recordFailedMove(String direction, Point position) {
+    BoundaryEvidence evidence = boundaryEvidence.computeIfAbsent(
+      direction,
+      k -> new BoundaryEvidence()
+    );
+    evidence.addFailedMove(position);
+  }
+
+  public void checkVisionLimitObstacles(
+    Collection<Percept> percepts,
+    Point currentPos
+  ) {
+    // Reset continuous obstacle counts
+    Map<String, Integer> continuousObstacles = new HashMap<>();
+
+    // Check for continuous obstacles at vision limits
+    for (Percept percept : percepts) {
+      if (!"obstacle".equals(percept.getName())) continue;
+
+      // Get relative coordinates
+      int relX = ((NumberTerm) percept.getParameters().get(0)).solve();
+      int relY = ((NumberTerm) percept.getParameters().get(1)).solve();
+
+      // Check if obstacle is at vision limit
+      if (
+        Math.abs(relX) == AWARENESS_DISTANCE ||
+        Math.abs(relY) == AWARENESS_DISTANCE
+      ) {
+        String direction = getDirectionFromRelative(relX, relY);
+        continuousObstacles.merge(direction, 1, Integer::sum);
+      }
+    }
+
+    // Update evidence for each direction
+    for (Map.Entry<String, Integer> entry : continuousObstacles.entrySet()) {
+      BoundaryEvidence evidence = boundaryEvidence.computeIfAbsent(
+        entry.getKey(),
+        k -> new BoundaryEvidence()
+      );
+      evidence.addObstacleEvidence(entry.getValue());
+    }
+  }
+
+  private String getDirectionFromRelative(int relX, int relY) {
+    if (Math.abs(relX) > Math.abs(relY)) {
+      return relX > 0 ? "e" : "w";
+    } else {
+      return relY > 0 ? "s" : "n";
+    }
+  }
+
+  public Point getLastConfirmedBoundary(String direction) {
+    BoundaryEvidence evidence = boundaryEvidence.get(direction);
+    return evidence != null ? evidence.lastConfirmedPosition : null;
+  }
+
+  public void recordBoundary(String direction, Point currentPos) {
+    // For failed_forbidden failures, we can immediately confirm the boundary
+    Point boundaryPos = new Point(currentPos.x, currentPos.y);
+
+    // The boundary is at the position we tried to move to
+    switch (direction) {
+      case "n":
+        boundaryPos.y--;
+        break;
+      case "s":
+        boundaryPos.y++;
+        break;
+      case "e":
+        boundaryPos.x++;
+        break;
+      case "w":
+        boundaryPos.x--;
+        break;
+    }
+
+    confirmedBoundaries.put(direction, new BoundaryInfo(boundaryPos));
+
+    if (DEBUG) {
+      System.out.println(
+        "Confirmed boundary " + direction + " at " + boundaryPos
+      );
+    }
+  }
+
+  public void recordObstacle(Point position) {
+    // For failed_path failures
+    staticObstacles.put(position, new ObstacleInfo());
+  }
+
+  public Point getBoundaryPosition(String direction) {
+    BoundaryInfo info = confirmedBoundaries.get(direction);
+    return info != null ? info.position : null;
+  }
+
+  public Map<String, Point> getConfirmedBoundaries() {
+    Map<String, Point> boundaries = new HashMap<>();
+    confirmedBoundaries.forEach(
+      (dir, info) -> boundaries.put(dir, info.position)
+    );
+    return boundaries;
+  }
+
+  public void updateFromPercepts(
+    Collection<Percept> percepts,
+    Point currentPos
+  ) {
+    // Track currently visible dynamic obstacles
+    Set<Point> currentlyVisible = new HashSet<>();
+
+    for (Percept percept : percepts) {
+      if ("thing".equals(percept.getName())) { // Dynamic obstacles are "things"
+        // Get relative coordinates and type from percept
+        int relX = ((NumberTerm) percept.getParameters().get(0)).solve();
+        int relY = ((NumberTerm) percept.getParameters().get(1)).solve();
+        String type = ((Identifier) percept.getParameters().get(2)).toString();
+
+        // Only track other agents as dynamic obstacles
+        if ("entity".equals(type)) {
+          Point obstaclePos = new Point(
+            currentPos.x + relX,
+            currentPos.y + relY
+          );
+          currentlyVisible.add(obstaclePos);
+
+          // Update or add dynamic obstacle
+          dynamicObstacles
+            .computeIfAbsent(obstaclePos, k -> new ObstacleInfo())
+            .updateSeen();
+        }
+      }
+    }
+
+    // Clean up only dynamic obstacles that haven't been seen recently
+    long now = System.currentTimeMillis();
+    dynamicObstacles
+      .entrySet()
+      .removeIf(
+        entry ->
+          now - entry.getValue().lastSeen > 5000 && // 5 seconds TTL
+          !currentlyVisible.contains(entry.getKey())
+      );
+  }
+
+  public boolean isForbidden(Point pos) {
+    // Check against confirmed boundaries
+    for (Map.Entry<String, BoundaryInfo> entry : confirmedBoundaries.entrySet()) {
+      String direction = entry.getKey();
+      Point boundary = entry.getValue().position;
+
+      switch (direction) {
+        case "n":
+          if (pos.y <= boundary.y) return true;
+          break;
+        case "s":
+          if (pos.y >= boundary.y) return true;
+          break;
+        case "w":
+          if (pos.x <= boundary.x) return true;
+          break;
+        case "e":
+          if (pos.x >= boundary.x) return true;
+          break;
+      }
+    }
+
+    // Check against known obstacles
+    return staticObstacles.containsKey(pos);
+  }
+
+  // Renamed from isOutOfBounds to better reflect its purpose
+  public boolean isForbiddenMove(Point pos) {
+    return isForbidden(pos);
+  }
+
+  public Set<Point> getObstaclesInRange(Point center, int range) {
+    Set<Point> result = new HashSet<>();
+    for (Point obstaclePos : staticObstacles.keySet()) {
+      if (
+        Math.abs(obstaclePos.x - center.x) <= range &&
+        Math.abs(obstaclePos.y - center.y) <= range
+      ) {
+        result.add(obstaclePos);
+      }
+    }
+    return result;
+  }
+
+  public boolean isDynamicObstacle(Point pos) {
+    return dynamicObstacles.containsKey(pos);
+  }
+
+  public boolean isStaticObstacle(Point pos) {
+    return staticObstacles.containsKey(pos);
+  }
+
+  public void recordStaticObstacle(Point position) {
+    staticObstacles.put(position, new ObstacleInfo());
+  }
+
+  public void addOtherAgent(int relX, int relY, Point currentPos) {
+    Point agentPos = new Point(currentPos.x + relX, currentPos.y + relY);
+    dynamicObstacles.put(agentPos, new ObstacleInfo());
+
+    if (DEBUG) {
+      System.out.println("Added dynamic obstacle (agent) at " + agentPos);
+    }
+  }
+
+  // Helper method to clear dynamic obstacles at the start of each step
+  public void clearDynamicObstacles() {
+    dynamicObstacles.clear();
+  }
+
+  // Get all dynamic obstacles for path planning
+  public Set<Point> getDynamicObstacles() {
+    return new HashSet<>(dynamicObstacles.keySet());
+  }
+
+  // Get all static obstacles for path planning
+  public Set<Point> getStaticObstacles() {
+    return new HashSet<>(staticObstacles.keySet());
   }
 }
