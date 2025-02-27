@@ -30,6 +30,9 @@ public class LocalMap {
   // Add a lock for position updates
   private final Object positionLock = new Object();
 
+  // Add debug tracking map
+  private final Map<String, EntityDebugInfo> debugTrackingMap;
+
   public enum EntityType {
     DISPENSER,
     BLOCK,
@@ -126,12 +129,37 @@ public class LocalMap {
     }
   }
 
+  // Debug tracking class
+  private static class EntityDebugInfo {
+    final Point relativePos;
+    final Point agentAbsPos;
+    final long timestamp;
+
+    EntityDebugInfo(Point relativePos, Point agentAbsPos) {
+      this.relativePos = relativePos;
+      this.agentAbsPos = agentAbsPos;
+      this.timestamp = System.currentTimeMillis();
+    }
+
+    @Override
+    public String toString() {
+      return String.format(
+        "relative(%d,%d) from agent(%d,%d)",
+        relativePos.x,
+        relativePos.y,
+        agentAbsPos.x,
+        agentAbsPos.y
+      );
+    }
+  }
+
   public LocalMap() {
     this.obstacles = new HashSet<>();
     this.currentPosition = new Point(0, 0);
     this.spatialGrid = new SpatialGrid();
     this.typeIndex = new EnumMap<>(EntityType.class);
     this.entityRegistry = new ConcurrentHashMap<>();
+    this.debugTrackingMap = DEBUG ? new ConcurrentHashMap<>() : null;
 
     // Initialize type index
     for (EntityType type : EntityType.values()) {
@@ -198,11 +226,17 @@ public class LocalMap {
   }
 
   // Entity management
-  private void addEntity(EntityType type, String subType, Point relativePos) {
+  private void addEntity(
+    EntityType type,
+    String subType,
+    Point relativePos,
+    Point currentAbsPos
+  ) {
     synchronized (positionLock) {
+      // Calculate absolute position using the provided current absolute position
       Point absolutePos = new Point(
-        currentPosition.x + relativePos.x,
-        currentPosition.y + relativePos.y
+        currentAbsPos.x + relativePos.x,
+        currentAbsPos.y + relativePos.y
       );
 
       // First, clean up any stale entities
@@ -214,7 +248,7 @@ public class LocalMap {
 
       if (existingEntity != null && !existingEntity.isStale()) {
         // Just update the last seen time
-        existingEntity.updateLastSeen(currentPosition);
+        existingEntity.updateLastSeen(currentAbsPos);
         return;
       }
 
@@ -223,26 +257,55 @@ public class LocalMap {
         type,
         subType,
         absolutePos,
-        currentPosition
+        currentAbsPos // Store the agent's position when this entity was added
       );
 
       entityRegistry.put(entityId, entity);
       typeIndex.get(type).put(entityId, entity);
       spatialGrid.add(absolutePos, entityId);
+
+      // Add debug tracking
+      if (DEBUG) {
+        debugTrackingMap.put(
+          entityId,
+          new EntityDebugInfo(relativePos, currentAbsPos)
+        );
+        logger.info(
+          String.format(
+            "[%s] Adding entity at abs(%d,%d) calculated from %s",
+            type,
+            absolutePos.x,
+            absolutePos.y,
+            debugTrackingMap.get(entityId)
+          )
+        );
+      }
     }
   }
 
   private void cleanupStaleEntities(EntityType type) {
-    // Remove entities that haven't been seen in a while
+    // Commenting out stale entity cleanup for now to maintain full history
+    /*
     long now = System.currentTimeMillis();
-    typeIndex
-      .get(type)
-      .values()
-      .removeIf(
-        e ->
-          now - e.lastSeen > STALE_THRESHOLD &&
-          !e.position.equals(currentPosition) // Don't remove entities at current position
-      );
+    
+    Set<String> staleEntities = typeIndex.get(type).values().stream()
+        .filter(e -> now - e.lastSeen > STALE_THRESHOLD && !e.position.equals(currentPosition))
+        .map(e -> e.id)
+        .collect(Collectors.toSet());
+
+    for (String entityId : staleEntities) {
+        Entity entity = entityRegistry.get(entityId);
+        if (entity != null) {
+            entityRegistry.remove(entityId);
+            typeIndex.get(entity.type).remove(entityId);
+            spatialGrid.remove(entity.position, entityId);
+            
+            if (DEBUG) {
+                debugTrackingMap.remove(entityId);
+            }
+        }
+    }
+    */
   }
 
   private String generateEntityId(EntityType type, Point pos, String subType) {
@@ -256,19 +319,23 @@ public class LocalMap {
   }
 
   // Public API for adding entities
-  public void addDispenser(Point relativePos, String subType) {
-    addEntity(EntityType.DISPENSER, subType, relativePos);
+  public void addDispenser(
+    Point relativePos,
+    String subType,
+    Point currentAbsPos
+  ) {
+    addEntity(EntityType.DISPENSER, subType, relativePos, currentAbsPos);
   }
 
-  public void addBlock(Point relativePos, String subType) {
-    addEntity(EntityType.BLOCK, subType, relativePos);
+  public void addBlock(Point relativePos, String subType, Point currentAbsPos) {
+    addEntity(EntityType.BLOCK, subType, relativePos, currentAbsPos);
   }
 
-  public void addObstacle(Point relativePos) {
+  public void addObstacle(Point relativePos, Point currentAbsPos) {
     synchronized (positionLock) {
       Point absolutePos = new Point(
-        currentPosition.x + relativePos.x,
-        currentPosition.y + relativePos.y
+        currentAbsPos.x + relativePos.x,
+        currentAbsPos.y + relativePos.y
       );
 
       // Only add if not already present
@@ -289,8 +356,8 @@ public class LocalMap {
     }
   }
 
-  public void addGoal(Point relativePos) {
-    addEntity(EntityType.GOAL, null, relativePos);
+  public void addGoal(Point relativePos, Point currentAbsPos) {
+    addEntity(EntityType.GOAL, null, relativePos, currentAbsPos);
   }
 
   // Query methods for external search algorithms
@@ -360,7 +427,7 @@ public class LocalMap {
     StringBuilder sb = new StringBuilder();
     sb.append("=== LocalMap State ===\n");
 
-    // Current position with coordinates
+    // Current position
     sb.append(
       String.format(
         "Agent Position: (%d,%d)\n",
@@ -370,85 +437,78 @@ public class LocalMap {
     );
     sb.append("--------------------\n");
 
-    // Group entities by their X coordinate for better spatial understanding
-    Map<Integer, List<Entity>> dispensersByX = typeIndex
+    // Dispensers
+    sb.append("Dispensers:\n");
+    typeIndex
       .get(EntityType.DISPENSER)
       .values()
       .stream()
       .filter(e -> !e.isStale())
-      .collect(Collectors.groupingBy(e -> e.position.x));
-
-    sb.append("Dispensers by column:\n");
-    dispensersByX
-      .entrySet()
-      .stream()
-      .sorted(Map.Entry.comparingByKey())
+      .sorted(
+        (e1, e2) -> {
+          int xCompare = Integer.compare(e1.position.x, e2.position.x);
+          return xCompare != 0
+            ? xCompare
+            : Integer.compare(e1.position.y, e2.position.y);
+        }
+      )
       .forEach(
-        entry -> {
-          sb.append(String.format("X=%d:\n", entry.getKey()));
-          entry
-            .getValue()
-            .stream()
-            .sorted((e1, e2) -> Integer.compare(e1.position.y, e2.position.y))
-            .forEach(
-              e ->
-                sb.append(
-                  String.format("  %s at y=%d\n", e.subType, e.position.y)
-                )
-            );
+        e -> {
+          String debugInfo = DEBUG ? debugTrackingMap.get(e.id).toString() : "";
+          sb.append(
+            String.format(
+              "(%d,%d) %s %s\n",
+              e.position.x,
+              e.position.y,
+              e.subType,
+              DEBUG ? "[" + debugInfo + "]" : ""
+            )
+          );
         }
       );
 
-    // Group obstacles by X coordinate
-    Map<Integer, List<Point>> obstaclesByX = obstacles
+    // Obstacles
+    sb.append("\nObstacles:\n");
+    obstacles
       .stream()
-      .collect(Collectors.groupingBy(p -> p.x));
-
-    sb.append("\nObstacles by column:\n");
-    obstaclesByX
-      .entrySet()
-      .stream()
-      .sorted(Map.Entry.comparingByKey())
-      .forEach(
-        entry -> {
-          sb.append(String.format("X=%d: ", entry.getKey()));
-          String yValues = entry
-            .getValue()
-            .stream()
-            .map(p -> String.valueOf(p.y))
-            .sorted()
-            .collect(Collectors.joining(", "));
-          sb.append(String.format("y=[%s]\n", yValues));
+      .sorted(
+        (p1, p2) -> {
+          int xCompare = Integer.compare(p1.x, p2.x);
+          return xCompare != 0 ? xCompare : Integer.compare(p1.y, p2.y);
         }
-      );
+      )
+      .forEach(p -> sb.append(String.format("(%d,%d)\n", p.x, p.y)));
 
-    // Goals grouped by X coordinate
-    Map<Integer, List<Entity>> goalsByX = typeIndex
+    // Goals
+    sb.append("\nGoals:\n");
+    typeIndex
       .get(EntityType.GOAL)
       .values()
       .stream()
       .filter(e -> !e.isStale())
-      .collect(Collectors.groupingBy(e -> e.position.x));
-
-    sb.append("\nGoals by column:\n");
-    goalsByX
-      .entrySet()
-      .stream()
-      .sorted(Map.Entry.comparingByKey())
+      .sorted(
+        (e1, e2) -> {
+          int xCompare = Integer.compare(e1.position.x, e2.position.x);
+          return xCompare != 0
+            ? xCompare
+            : Integer.compare(e1.position.y, e2.position.y);
+        }
+      )
       .forEach(
-        entry -> {
-          sb.append(String.format("X=%d: ", entry.getKey()));
-          String yValues = entry
-            .getValue()
-            .stream()
-            .map(e -> String.valueOf(e.position.y))
-            .sorted()
-            .collect(Collectors.joining(", "));
-          sb.append(String.format("y=[%s]\n", yValues));
+        e -> {
+          String debugInfo = DEBUG ? debugTrackingMap.get(e.id).toString() : "";
+          sb.append(
+            String.format(
+              "(%d,%d)%s\n",
+              e.position.x,
+              e.position.y,
+              DEBUG ? " [" + debugInfo + "]" : ""
+            )
+          );
         }
       );
 
-    // Add statistics
+    // Statistics
     sb.append("\nStatistics:\n");
     sb.append(
       String.format(

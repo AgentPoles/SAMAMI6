@@ -140,6 +140,9 @@ public class MI6Model {
   private final RandomMovement randomMovement;
   private final PlannedMovement plannedMovement;
 
+  // Add a lock object for synchronizing percept and movement processing
+  private final Object actionLock = new Object();
+
   public MI6Model(EnvironmentInterfaceStandard ei) {
     this.ei = ei;
     this.agentMaps = new ConcurrentHashMap<>();
@@ -175,19 +178,27 @@ public class MI6Model {
   }
 
   public boolean moveTowards(String agName, String direction) throws Exception {
-    try {
-      ei.performAction(
-        agName,
-        new Action("move", new Identifier(direction.toLowerCase()))
-      );
-      // Update the local map position after successful movement
-      LocalMap map = getAgentMap(agName);
-      map.updatePositionFromMovement(direction);
-      randomMovement.recordSuccess(agName);
-      logMapState(agName); // Log state after successful move
-      return true;
-    } catch (Exception e) {
-      return handleMoveFailure(agName, direction, e);
+    synchronized (actionLock) {
+      try {
+        LocalMap map = getAgentMap(agName);
+        // Calculate expected new position before movement
+        Point currentPos = map.getCurrentPosition();
+        Point expectedPos = calculateNewPosition(currentPos, direction);
+
+        // Perform the action
+        ei.performAction(
+          agName,
+          new Action("move", new Identifier(direction.toLowerCase()))
+        );
+
+        // Update the local map position after successful movement
+        map.updatePositionFromMovement(direction);
+        randomMovement.recordSuccess(agName);
+        logMapState(agName);
+        return true;
+      } catch (Exception e) {
+        return handleMoveFailure(agName, direction, e);
+      }
     }
   }
 
@@ -630,95 +641,104 @@ public class MI6Model {
   }
 
   public void processPercepts(String agName, Collection<Percept> percepts) {
-    try {
-      long currentTime = System.currentTimeMillis();
-      Long lastTime = lastProcessedTime.get(agName);
+    synchronized (actionLock) {
+      try {
+        long currentTime = System.currentTimeMillis();
+        Long lastTime = lastProcessedTime.get(agName);
 
-      // Skip if we processed percepts too recently
-      if (lastTime != null && currentTime - lastTime < PERCEPT_THRESHOLD) {
-        return;
-      }
-
-      if (!agentMaps.containsKey(agName)) {
-        initializeAgent(agName);
-      }
-
-      LocalMap map = getAgentMap(agName);
-
-      // Process all percepts
-      for (Percept p : percepts) {
-        String name = p.getName();
-        Parameter[] params = p.getParameters().toArray(new Parameter[0]);
-
-        switch (name) {
-          case "thing":
-            processThingPercept(agName, p);
-            break;
-          case "obstacle":
-            int obstX = ((Numeral) params[0]).getValue().intValue();
-            int obstY = ((Numeral) params[1]).getValue().intValue();
-            map.addObstacle(new Point(obstX, obstY));
-            break;
-          case "goal":
-            int goalX = ((Numeral) params[0]).getValue().intValue();
-            int goalY = ((Numeral) params[1]).getValue().intValue();
-            map.addGoal(new Point(goalX, goalY));
-            break;
+        // Skip if we processed percepts too recently
+        if (lastTime != null && currentTime - lastTime < PERCEPT_THRESHOLD) {
+          return;
         }
-      }
 
-      map.clearStaleEntities();
-      lastProcessedTime.put(agName, currentTime);
-    } catch (Exception e) {
-      logger.log(Level.WARNING, "Error processing percepts for " + agName, e);
+        if (!agentMaps.containsKey(agName)) {
+          initializeAgent(agName);
+        }
+
+        LocalMap map = getAgentMap(agName);
+        // Get current absolute position once for all percepts
+        Point currentAbsPos = map.getCurrentPosition();
+
+        for (Percept p : percepts) {
+          String name = p.getName();
+          Parameter[] params = p.getParameters().toArray(new Parameter[0]);
+
+          switch (name) {
+            case "thing":
+              processThingPercept(agName, p, currentAbsPos);
+              break;
+            case "obstacle":
+              int obstX = ((Numeral) params[0]).getValue().intValue();
+              int obstY = ((Numeral) params[1]).getValue().intValue();
+              map.addObstacle(new Point(obstX, obstY), currentAbsPos);
+              break;
+            case "goal":
+              int goalX = ((Numeral) params[0]).getValue().intValue();
+              int goalY = ((Numeral) params[1]).getValue().intValue();
+              map.addGoal(new Point(goalX, goalY), currentAbsPos);
+              break;
+          }
+        }
+
+        map.clearStaleEntities();
+        lastProcessedTime.put(agName, currentTime);
+      } catch (Exception e) {
+        logger.log(Level.WARNING, "Error processing percepts for " + agName, e);
+      }
     }
   }
 
-  private void processThingPercept(String agName, Percept p) {
-    try {
-      Parameter[] params = p.getParameters().toArray(new Parameter[0]);
-      int relX = ((Numeral) params[0]).getValue().intValue();
-      int relY = ((Numeral) params[1]).getValue().intValue();
-      String type = ((Identifier) params[2]).getValue();
-      String details = params.length > 3
-        ? ((Identifier) params[3]).getValue()
-        : null;
+  private void processThingPercept(
+    String agName,
+    Percept p,
+    Point currentAbsPos
+  ) {
+    synchronized (actionLock) {
+      try {
+        Parameter[] params = p.getParameters().toArray(new Parameter[0]);
+        int relX = ((Numeral) params[0]).getValue().intValue();
+        int relY = ((Numeral) params[1]).getValue().intValue();
+        String type = ((Identifier) params[2]).getValue();
+        String details = params.length > 3
+          ? ((Identifier) params[3]).getValue()
+          : null;
 
-      LocalMap map = getAgentMap(agName);
-      Point relativePos = new Point(relX, relY);
+        LocalMap map = getAgentMap(agName);
+        Point relativePos = new Point(relX, relY);
 
-      if (LocalMap.DEBUG) {
-        logger.info(
-          String.format(
-            "[%s] Processing thing: %s at (%d,%d) [abs: %s] with details %s",
-            agName,
-            type,
-            relX,
-            relY,
-            map.getCurrentPosition(),
-            details
-          )
-        );
+        if (LocalMap.DEBUG) {
+          logger.info(
+            String.format(
+              "[%s] Processing thing: %s at (%d,%d) [abs: %s] with details %s",
+              agName,
+              type,
+              relX,
+              relY,
+              currentAbsPos,
+              details
+            )
+          );
+        }
+
+        switch (type) {
+          case "dispenser":
+            if (
+              details != null && (details.equals("b0") || details.equals("b1"))
+            ) {
+              map.addDispenser(relativePos, details, currentAbsPos);
+            }
+            break;
+          case "block":
+            if (
+              details != null && (details.equals("b0") || details.equals("b1"))
+            ) {
+              map.addBlock(relativePos, details, currentAbsPos);
+            }
+            break;
+        }
+      } catch (Exception e) {
+        logger.warning("Error processing thing percept: " + e.getMessage());
       }
-
-      switch (type) {
-        case "dispenser":
-          if (
-            details != null && (details.equals("b0") || details.equals("b1"))
-          ) {
-            map.addDispenser(relativePos, details);
-          }
-          break;
-        case "block":
-          if (
-            details != null && (details.equals("b0") || details.equals("b1"))
-          ) {
-            map.addBlock(relativePos, details);
-          }
-          break;
-      }
-    } catch (Exception e) {
-      logger.warning("Error processing thing percept: " + e.getMessage());
     }
   }
 
