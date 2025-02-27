@@ -54,6 +54,10 @@ public class MI6Model {
   private static final int BOUNDARY_ESCAPE_ATTEMPTS = 5;
   private static final double RANDOM_ESCAPE_PROBABILITY = 0.4; // 40% chance for random direction when stuck
 
+  // Movement failure tracking constants
+  private static final int MAX_CONSECUTIVE_FAILURES = 3;
+  private static final long FAILURE_COOLDOWN = 5000; // 5 seconds cooldown for failed directions
+
   private static class MovementHistory {
     Point lastPosition;
     int stuckCount;
@@ -143,6 +147,46 @@ public class MI6Model {
   // Add a lock object for synchronizing percept and movement processing
   private final Object actionLock = new Object();
 
+  // Track movement failures per agent
+  private final Map<String, Map<String, DirectionStatus>> agentDirectionStatus = new ConcurrentHashMap<>();
+
+  // Add these inner classes at the top of MI6Model class, after the constants
+  private static class MovementFailure {
+    final String direction;
+    final String reason;
+    final long timestamp;
+    final Point position;
+
+    MovementFailure(String direction, String reason, Point position) {
+      this.direction = direction;
+      this.reason = reason;
+      this.timestamp = System.currentTimeMillis();
+      this.position = position;
+    }
+  }
+
+  private static class DirectionStatus {
+    int consecutiveFailures = 0;
+    long lastFailureTime = 0;
+    List<MovementFailure> recentFailures = new ArrayList<>();
+
+    void recordFailure(String direction, String reason, Point position) {
+      consecutiveFailures++;
+      lastFailureTime = System.currentTimeMillis();
+      recentFailures.add(new MovementFailure(direction, reason, position));
+
+      // Keep only recent failures
+      while (recentFailures.size() > MAX_CONSECUTIVE_FAILURES) {
+        recentFailures.remove(0);
+      }
+    }
+
+    void recordSuccess() {
+      consecutiveFailures = 0;
+      recentFailures.clear();
+    }
+  }
+
   public MI6Model(EnvironmentInterfaceStandard ei) {
     this.ei = ei;
     this.agentMaps = new ConcurrentHashMap<>();
@@ -181,20 +225,35 @@ public class MI6Model {
     synchronized (actionLock) {
       try {
         LocalMap map = getAgentMap(agName);
-        // Calculate expected new position before movement
         Point currentPos = map.getCurrentPosition();
-        Point expectedPos = calculateNewPosition(currentPos, direction);
 
-        // Perform the action
+        // Calculate expected new position before movement
+        Point expectedPos = calculateTargetPosition(currentPos, direction);
+
+        // Perform the move action
         ei.performAction(
           agName,
           new Action("move", new Identifier(direction.toLowerCase()))
         );
 
-        // Update the local map position after successful movement
+        // If we get here, move was successful
         map.updatePositionFromMovement(direction);
-        randomMovement.recordSuccess(agName);
-        logMapState(agName);
+        getDirectionStatus(agName, direction).recordSuccess();
+
+        if (LocalMap.DEBUG) {
+          logger.info(
+            String.format(
+              "[%s] Successfully moved %s from (%d,%d) to (%d,%d)",
+              agName,
+              direction,
+              currentPos.x,
+              currentPos.y,
+              map.getCurrentPosition().x,
+              map.getCurrentPosition().y
+            )
+          );
+        }
+
         return true;
       } catch (Exception e) {
         return handleMoveFailure(agName, direction, e);
@@ -202,7 +261,59 @@ public class MI6Model {
     }
   }
 
-  private Point calculateNewPosition(Point current, String direction) {
+  private DirectionStatus getDirectionStatus(String agName, String direction) {
+    return agentDirectionStatus
+      .computeIfAbsent(agName, k -> new ConcurrentHashMap<>())
+      .computeIfAbsent(direction, k -> new DirectionStatus());
+  }
+
+  private boolean handleMoveFailure(
+    String agName,
+    String direction,
+    Exception e
+  ) {
+    String errorMsg = e.getMessage();
+    LocalMap map = getAgentMap(agName);
+    Point failurePos = map.getCurrentPosition();
+    DirectionStatus dirStatus = getDirectionStatus(agName, direction);
+
+    // Categorize and handle the failure
+    String failureReason;
+    if (errorMsg != null && errorMsg.toLowerCase().contains("forbidden")) {
+      failureReason = "forbidden";
+      // Update map with potential obstacle at the target position
+      Point targetPos = calculateTargetPosition(failurePos, direction);
+      map.addObstacle(
+        new Point(targetPos.x - failurePos.x, targetPos.y - failurePos.y),
+        failurePos
+      );
+    } else if (errorMsg != null && errorMsg.toLowerCase().contains("invalid")) {
+      failureReason = "invalid_parameter";
+    } else {
+      failureReason = "unknown";
+    }
+
+    // Record the failure
+    dirStatus.recordFailure(direction, failureReason, failurePos);
+
+    if (LocalMap.DEBUG) {
+      logger.warning(
+        String.format(
+          "[%s] Move failed in direction %s at (%d,%d): %s (consecutive failures: %d)",
+          agName,
+          direction,
+          failurePos.x,
+          failurePos.y,
+          failureReason,
+          dirStatus.consecutiveFailures
+        )
+      );
+    }
+
+    return false;
+  }
+
+  private Point calculateTargetPosition(Point current, String direction) {
     switch (direction.toLowerCase()) {
       case "n":
         return new Point(current.x, current.y - 1);
@@ -215,27 +326,6 @@ public class MI6Model {
       default:
         return current;
     }
-  }
-
-  private boolean handleMoveFailure(
-    String agName,
-    String direction,
-    Exception e
-  )
-    throws Exception {
-    String errorMsg = e != null ? e.getMessage() : "Unknown error";
-    logger.warning("Move failed for agent " + agName + ": " + errorMsg);
-
-    // If we have a specific error message, we might want to handle it differently
-    if (errorMsg != null && errorMsg.toLowerCase().contains("forbidden")) {
-      // Handle forbidden move
-      randomMovement.recordFailure(agName, direction, "failed_forbidden");
-      logMapState(agName); // Log state after failed move
-      return false;
-    }
-
-    // Re-throw the exception if we can't handle it
-    throw new Exception("Move failed: " + errorMsg);
   }
 
   public boolean requestBlock(String agName, String direction) {
