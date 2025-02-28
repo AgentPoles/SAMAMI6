@@ -239,42 +239,37 @@ public class RandomMovement {
       return null;
     }
 
-    // If we're stuck, try to break out
-    if (memory.isStuck()) {
-      String breakoutDir = getBreakoutDirection(
-        new ArrayList<>(availableDirections),
-        memory.getLastDirection()
-      );
-      System.out.println(
-        "[RandomMovement] " +
-        agName +
-        ": Stuck! Breaking out with direction: " +
-        breakoutDir
-      );
-      if (breakoutDir != null) {
-        memory.addMove(
-          breakoutDir,
-          calculateNextPosition(currentPos, breakoutDir)
-        );
-        return breakoutDir;
-      }
-    }
+    // Get exploration recommendation
+    String explorationDir = Exploration.getRecommendedDirection(
+      agName,
+      map,
+      currentPos
+    );
 
     // Calculate scores for each direction
     Map<String, Double> scores = new HashMap<>();
     for (String direction : availableDirections) {
-      Point targetPos = calculateNextPosition(currentPos, direction);
-
-      // Component scores
+      // Base scores (existing calculations)
       double safetyScore =
-        getObstacleAvoidanceScore(agName, map, currentPos, targetPos) * 0.3;
-      double entropyScore = (1.0 - entropyMap.getHeat(targetPos)) * 0.2;
-      double momentumScore = getMomentumScore(direction, memory) * 0.2;
-      double explorationScore =
-        calculateExplorationScore(targetPos, agName, map) * 0.3;
+        getObstacleAvoidanceScore(
+          agName,
+          map,
+          currentPos,
+          calculateNextPosition(currentPos, direction)
+        ) *
+        0.3;
+      double entropyScore =
+        (
+          1.0 - entropyMap.getHeat(calculateNextPosition(currentPos, direction))
+        ) *
+        0.15;
+      double momentumScore = getMomentumScore(direction, memory) * 0.15;
+
+      // Exploration score
+      double explorationScore = direction.equals(explorationDir) ? 0.4 : 0.0;
 
       // Combine scores with randomization factor
-      double randomFactor = random.nextDouble() * 0.2; // Add some randomness
+      double randomFactor = random.nextDouble() * 0.1;
       scores.put(
         direction,
         safetyScore +
