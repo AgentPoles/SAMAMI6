@@ -235,16 +235,50 @@ public class RandomMovement {
 
     // If stuck, try to break pattern
     if (memory.isStuck()) {
-      return getOppositeDirection(memory.getLastDirection());
+      return getBreakoutDirection(
+        availableDirections,
+        memory.getLastDirection()
+      );
     }
+
+    // Get current zone info
+    Point currentZone = getCurrentZone(currentPos);
+    AgentZoneMemory agentZoneMemory = agentZoneMemories.computeIfAbsent(
+      agName,
+      k -> new AgentZoneMemory()
+    );
+    agentZoneMemory.recordZone(currentZone);
 
     // Score each available direction
     String bestDirection = null;
     double bestScore = Double.NEGATIVE_INFINITY;
 
+    // Update static obstacle information
+    updateStaticObstacleInfo(agName, map, currentPos);
+
     for (String direction : availableDirections) {
       Point targetPos = calculateTargetPosition(currentPos, direction);
-      double score = scoreDirection(direction, targetPos, memory, entropyMap);
+
+      // Calculate comprehensive score combining all factors
+      double safetyScore =
+        getObstacleAvoidanceScore(agName, map, currentPos, targetPos) *
+        getStaticSafetyScore(agName, map, currentPos, targetPos);
+      double entropyScore = 1.0 - entropyMap.getHeat(targetPos);
+      double momentumScore = getMomentumScore(direction, memory);
+
+      // Use AgentZoneMemory for zone scoring
+      double zoneScore = agentZoneMemory.isZoneOvervisited(
+          getCurrentZone(targetPos)
+        )
+        ? 0.2
+        : 1.0;
+
+      // Combine scores with weights
+      double score =
+        (safetyScore * memory.obstacleWeight) +
+        (entropyScore * memory.entropyWeight) +
+        (momentumScore * memory.momentumWeight) +
+        (zoneScore * ZONE_WEIGHT);
 
       if (score > bestScore) {
         bestScore = score;

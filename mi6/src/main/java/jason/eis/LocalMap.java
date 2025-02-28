@@ -3,6 +3,7 @@ package jason.eis;
 import jason.asSyntax.Atom;
 import jason.asSyntax.NumberTerm;
 import jason.asSyntax.Term;
+import jason.eis.movements.Search;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
@@ -55,60 +56,68 @@ public class LocalMap {
   private final Map<String, BoundaryInfo> confirmedBoundaries = new HashMap<>();
   private final Map<Point, ObstacleInfo> staticObstacles = new HashMap<>();
 
+  // Add these collections if they don't exist
+  private final Map<Point, Entity> dispensers = new HashMap<>();
+  private final Map<Point, Entity> blocks = new HashMap<>();
+  private final Map<Point, Entity> goals = new HashMap<>();
+
   public enum EntityType {
     DISPENSER,
     BLOCK,
-    OBSTACLE,
     GOAL,
+    AGENT,
+    OBSTACLE,
   }
 
-  private static class Entity {
-    final String id;
-    final EntityType type;
-    final String subType; // b0/b1 for blocks/dispensers
-    Point position;
-    Point agentPosWhenAdded;
-    long lastSeen;
+  public static class Entity {
+    private final String id;
+    private final EntityType type;
+    private final String details;
+    private final Point position;
+    private final Point relativePos;
+    private long lastSeen;
 
-    Entity(
+    public Entity(
       String id,
       EntityType type,
-      String subType,
+      String details,
       Point position,
-      Point agentPos
+      Point relativePos
     ) {
       this.id = id;
       this.type = type;
-      this.subType = subType;
+      this.details = details;
       this.position = position;
-      this.agentPosWhenAdded = agentPos;
-      this.lastSeen = System.nanoTime();
+      this.relativePos = relativePos;
+      this.lastSeen = System.currentTimeMillis();
     }
 
-    void updatePosition(Point newPos) {
-      this.position = newPos;
-      this.lastSeen = System.nanoTime();
+    public String getId() {
+      return id;
     }
 
-    boolean isStale() {
-      return (System.nanoTime() - lastSeen) / 1_000_000 > STALE_THRESHOLD;
+    public EntityType getType() {
+      return type;
     }
 
-    @Override
-    public boolean equals(Object o) {
-      if (this == o) return true;
-      if (!(o instanceof Entity)) return false;
-      Entity other = (Entity) o;
-      return id.equals(other.id);
+    public String getDetails() {
+      return details;
     }
 
-    @Override
-    public int hashCode() {
-      return id.hashCode();
+    public Point getPosition() {
+      return position;
     }
 
-    void updateLastSeen(Point currentPosition) {
-      this.lastSeen = System.nanoTime();
+    public Point getRelativePos() {
+      return relativePos;
+    }
+
+    public void updateLastSeen() {
+      this.lastSeen = System.currentTimeMillis();
+    }
+
+    public boolean isStale() {
+      return System.currentTimeMillis() - lastSeen > STALE_THRESHOLD;
     }
   }
 
@@ -148,6 +157,27 @@ public class LocalMap {
     void move(Point oldPos, Point newPos, String entityId) {
       remove(oldPos, entityId);
       add(newPos, entityId);
+    }
+
+    public Collection<Entity> getNearbyEntities(int x, int y, int range) {
+      List<Entity> nearby = new ArrayList<>();
+      for (int dx = -range; dx <= range; dx++) {
+        for (int dy = -range; dy <= range; dy++) {
+          int checkX = x + dx;
+          int checkY = y + dy;
+          Entity entity = getEntity(checkX, checkY);
+          if (entity != null) {
+            nearby.add(entity);
+          }
+        }
+      }
+      return nearby;
+    }
+
+    private Entity getEntity(int x, int y) {
+      // Implement based on your grid structure
+      // This is a placeholder implementation
+      return null;
     }
   }
 
@@ -358,7 +388,7 @@ public class LocalMap {
 
       if (existingEntity != null && !existingEntity.isStale()) {
         // Just update the last seen time
-        existingEntity.updateLastSeen(currentAbsPos);
+        existingEntity.updateLastSeen();
         return;
       }
 
@@ -367,7 +397,7 @@ public class LocalMap {
         type,
         subType,
         absolutePos,
-        currentAbsPos // Store the agent's position when this entity was added
+        relativePos
       );
 
       entityRegistry.put(entityId, entity);
@@ -378,7 +408,7 @@ public class LocalMap {
       if (DEBUG) {
         debugTrackingMap.put(
           entityId,
-          new EntityDebugInfo(relativePos, currentAbsPos)
+          new EntityDebugInfo(relativePos, absolutePos)
         );
         logger.info(
           String.format(
@@ -431,14 +461,40 @@ public class LocalMap {
   // Public API for adding entities
   public void addDispenser(
     Point relativePos,
-    String subType,
+    String details,
     Point currentAbsPos
   ) {
-    addEntity(EntityType.DISPENSER, subType, relativePos, currentAbsPos);
+    Point absolutePos = new Point(
+      currentAbsPos.x + relativePos.x,
+      currentAbsPos.y + relativePos.y
+    );
+    dispensers.put(
+      absolutePos,
+      new Entity(
+        "dispenser_" + absolutePos.toString(),
+        EntityType.DISPENSER,
+        details,
+        absolutePos,
+        relativePos
+      )
+    );
   }
 
-  public void addBlock(Point relativePos, String subType, Point currentAbsPos) {
-    addEntity(EntityType.BLOCK, subType, relativePos, currentAbsPos);
+  public void addBlock(Point relativePos, String details, Point currentAbsPos) {
+    Point absolutePos = new Point(
+      currentAbsPos.x + relativePos.x,
+      currentAbsPos.y + relativePos.y
+    );
+    blocks.put(
+      absolutePos,
+      new Entity(
+        "block_" + absolutePos.toString(),
+        EntityType.BLOCK,
+        details,
+        absolutePos,
+        relativePos
+      )
+    );
   }
 
   public void addObstacle(Point relativePos, Point currentAbsPos) {
@@ -473,7 +529,20 @@ public class LocalMap {
   }
 
   public void addGoal(Point relativePos, Point currentAbsPos) {
-    addEntity(EntityType.GOAL, null, relativePos, currentAbsPos);
+    Point absolutePos = new Point(
+      currentAbsPos.x + relativePos.x,
+      currentAbsPos.y + relativePos.y
+    );
+    goals.put(
+      absolutePos,
+      new Entity(
+        "goal_" + absolutePos.toString(),
+        EntityType.GOAL,
+        "goal",
+        absolutePos,
+        relativePos
+      )
+    );
   }
 
   // Query methods for external search algorithms
@@ -509,7 +578,7 @@ public class LocalMap {
       .values()
       .stream()
       .filter(
-        e -> !e.isStale() && (subType == null || subType.equals(e.subType))
+        e -> !e.isStale() && (subType == null || subType.equals(e.details))
       )
       .map(e -> e.position)
       .collect(Collectors.toSet());
@@ -639,9 +708,10 @@ public class LocalMap {
   }
 
   private double euclideanDistance(Point p1, Point p2) {
-    return Math.sqrt(
-      (p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y)
-    );
+    if (p1 == null || p2 == null) return Double.MAX_VALUE;
+    double dx = p1.x - p2.x;
+    double dy = p1.y - p2.y;
+    return Math.sqrt(dx * dx + dy * dy);
   }
 
   public Map<Point, ObstacleInfo> getDynamicObstacles() {
@@ -703,7 +773,7 @@ public class LocalMap {
               "(%d,%d) %s %s\n",
               e.position.x,
               e.position.y,
-              e.subType,
+              e.details,
               DEBUG ? "[" + debugInfo + "]" : ""
             )
           );
@@ -1171,5 +1241,75 @@ public class LocalMap {
       }
     }
     return false;
+  }
+
+  public Point findNearestTarget(
+    Point currentPos,
+    Search.TargetType targetType,
+    int maxRange
+  ) {
+    Point nearest = null;
+    double minDistance = Double.MAX_VALUE;
+
+    // Get relevant entities from spatial grid based on type
+    Collection<Entity> entities = new ArrayList<>(); // Initialize empty list
+
+    // Collect entities based on type
+    switch (targetType) {
+      case DISPENSER:
+        entities = dispensers.values();
+        break;
+      case BLOCK:
+        entities = blocks.values();
+        break;
+      case GOAL:
+        entities = goals.values();
+        break;
+    }
+
+    for (Entity entity : entities) {
+      Point entityPos = entity.getPosition();
+      if (entityPos != null) {
+        double distance = euclideanDistance(currentPos, entityPos);
+        if (distance < minDistance && distance <= maxRange) {
+          minDistance = distance;
+          nearest = entityPos;
+        }
+      }
+    }
+
+    return nearest;
+  }
+
+  public Point findBestTarget(Point currentPos, Search.TargetType targetType) {
+    // For now, just use findNearestTarget without range limit
+    return findNearestTarget(currentPos, targetType, Integer.MAX_VALUE);
+  }
+
+  private boolean matchesTargetType(
+    Entity entity,
+    Search.TargetType targetType
+  ) {
+    if (entity == null) return false;
+
+    String entityType = entity.details;
+    if (entityType == null) return false;
+
+    switch (targetType) {
+      case DISPENSER:
+        return "dispenser".equals(entityType);
+      case BLOCK:
+        return "block".equals(entityType);
+      case GOAL:
+        return "goal".equals(entityType);
+      default:
+        return false;
+    }
+  }
+
+  public void removeEntity(Point pos) {
+    dispensers.remove(pos);
+    blocks.remove(pos);
+    goals.remove(pos);
   }
 }

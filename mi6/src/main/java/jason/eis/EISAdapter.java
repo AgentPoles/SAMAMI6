@@ -143,14 +143,6 @@ public class EISAdapter extends Environment implements AgentListener {
             );
           }
           return moving;
-        case "find_nearest_dispenser":
-          boolean found = model.findNearestDispenser(agName);
-          if (found) {
-            addPercept(agName, Literal.parseLiteral("found_dispenser(true)"));
-          } else {
-            addPercept(agName, Literal.parseLiteral("found_dispenser(false)"));
-          }
-          return found;
         default:
           return super.executeAction(agName, action);
       }
@@ -277,5 +269,29 @@ public class EISAdapter extends Environment implements AgentListener {
       }
     }
     return literals;
+  }
+
+  private boolean checkNearestDispenser(String agName) {
+    Point dispenser = model.findNearestDispenser(agName);
+    return dispenser != null; // Return true if a dispenser was found
+  }
+
+  public void updatePercepts(String agName) {
+    clearPercepts(agName);
+
+    // Get the agent's map
+    LocalMap map = model.getAgentMap(agName);
+    if (map == null) return;
+
+    // Fix the type mismatch error by using Point and null check
+    Point nearestDispenser = model.findNearestDispenser(agName);
+    if (nearestDispenser != null) {
+      addPercept(agName, Literal.parseLiteral("nearest_dispenser"));
+    }
+    // ... rest of the code ...
+  }
+
+  public void clearPercepts(String agName) {
+    // ... existing code ...
   }
 }

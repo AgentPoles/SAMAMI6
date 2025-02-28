@@ -6,6 +6,7 @@ import jason.asSyntax.*;
 import jason.eis.Point;
 import jason.eis.movements.PlannedMovement;
 import jason.eis.movements.RandomMovement;
+import jason.eis.movements.Search;
 import jason.environment.Environment;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -210,7 +211,7 @@ public class MI6Model {
     LocalMap.DEBUG = true;
 
     this.randomMovement = new RandomMovement(agentMaps);
-    this.plannedMovement = new PlannedMovement(agentMaps);
+    this.plannedMovement = new PlannedMovement();
 
     instance = this;
   }
@@ -853,8 +854,16 @@ public class MI6Model {
     }
   }
 
-  public boolean findNearestDispenser(String agName) {
-    return plannedMovement.findNearestDispenser(agName);
+  public Point findNearestDispenser(String agName) {
+    LocalMap map = getAgentMap(agName);
+    if (map == null) return null;
+
+    Point currentPos = map.getCurrentPosition();
+    return map.findNearestTarget(
+      currentPos,
+      Search.TargetType.DISPENSER,
+      Integer.MAX_VALUE
+    );
   }
 
   public boolean moveToNearestDispenser(String agName) {
@@ -982,5 +991,41 @@ public class MI6Model {
     }
 
     return score;
+  }
+
+  public List<String> requestGuidance(String agName, int targetType, int size) {
+    LocalMap map = getAgentMap(agName);
+    if (map == null) return Collections.emptyList();
+
+    Search.TargetType searchType = convertTargetType(targetType);
+    Point currentPos = map.getCurrentPosition();
+    Point target = map.findNearestTarget(
+      currentPos,
+      searchType,
+      Integer.MAX_VALUE
+    );
+
+    if (target == null) {
+      return Collections.emptyList();
+    }
+
+    plannedMovement.setTarget(agName, target, searchType);
+    String nextMove = plannedMovement.getNextMove(agName, map);
+    return nextMove != null
+      ? Collections.singletonList(nextMove)
+      : Collections.emptyList();
+  }
+
+  private Search.TargetType convertTargetType(int type) {
+    switch (type) {
+      case 1:
+        return Search.TargetType.DISPENSER;
+      case 2:
+        return Search.TargetType.BLOCK;
+      case 3:
+        return Search.TargetType.GOAL;
+      default:
+        return Search.TargetType.DISPENSER;
+    }
   }
 }
