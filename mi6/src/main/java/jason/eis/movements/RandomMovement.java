@@ -2,6 +2,7 @@ package jason.eis.movements;
 
 import jason.eis.LocalMap;
 import jason.eis.LocalMap.ObstacleInfo;
+import jason.eis.MI6Model;
 import jason.eis.Point;
 import jason.eis.movements.ObstacleMemory;
 import java.util.*;
@@ -13,13 +14,27 @@ public class RandomMovement {
   private static final Logger logger = Logger.getLogger(
     RandomMovement.class.getName()
   );
-  private final Map<String, LocalMap> agentMaps;
-  private final Map<String, DirectionMemory> directionMemory = new ConcurrentHashMap<>();
-  private final Map<String, EntropyMap> entropyMaps = new ConcurrentHashMap<>();
+  private static final boolean DEBUG = true;
+  private static final int MEMORY_SIZE = 5;
+  private static final int ZONE_SIZE = 5;
+  private static final double EXPLORATION_WEIGHT = 0.6;
+  private static final int BOUNDARY_AWARENESS = 3;
+  private static final double SAFETY_THRESHOLD = 3.0;
+  private static final int MAX_ZONE_VISITS = 2;
+  private static final double ZONE_WEIGHT = 0.5;
+
   private final Random random = new Random();
+  private final Map<String, DirectionMemory> directionMemory = new HashMap<>();
+  private final Map<String, AgentZoneMemory> agentZoneMemories = new HashMap<>();
+  private final AgentCollisionHandler collisionHandler = new AgentCollisionHandler();
+  private final Map<String, EntropyMap> entropyMaps = new ConcurrentHashMap<>();
+  private final Map<String, BoundaryState> boundaryStates = new ConcurrentHashMap<>();
+  private final Map<String, StaticObstacleInfo> staticObstacleMemory = new ConcurrentHashMap<>();
+  private final Map<String, ObstacleMemory> obstacleMemories = new ConcurrentHashMap<>();
+  private final Map<Point, ZoneInfo> zoneMemory = new ConcurrentHashMap<>();
+  private final Map<String, Point> startingZones = new ConcurrentHashMap<>();
 
   // Constants
-  private static final int MEMORY_SIZE = 5;
   private static final double ENTROPY_DECAY = 0.95;
   private static final double BASE_WEIGHT = 0.5;
 
@@ -45,33 +60,14 @@ public class RandomMovement {
   // Constants for static obstacle and boundary handling
   private static final double BOUNDARY_DANGER_WEIGHT = 1.5; // Boundaries are very dangerous
   private static final double STATIC_OBSTACLE_WEIGHT = 1.2;
-  private static final int BOUNDARY_AWARENESS = 3; // Start avoiding boundaries at this distance
   private static final int CORNER_AWARENESS = 4; // Extra awareness near corners
 
   // Zone-based exploration constants
-  private static final int ZONE_SIZE = 5;
   private static final int ZONE_MEMORY = 10;
-  private static final double EXPLORATION_WEIGHT = 0.6;
   private static final double UNEXPLORED_BONUS = 0.8;
-
-  // Add this constant
-  private static final double SAFETY_THRESHOLD = 3.0; // Distance threshold for safety calculations
-
-  // Add these constants
-  private static final int MAX_ZONE_VISITS = 2;
-  private static final double ZONE_WEIGHT = 0.5;
 
   // Add repulsion from starting zone
   private static final int STARTING_ZONE_REPULSION = 20; // Distance to maintain from start
-  private final Map<String, Point> startingZones = new ConcurrentHashMap<>();
-
-  private final Map<String, BoundaryState> boundaryStates = new ConcurrentHashMap<>();
-
-  private final Map<String, StaticObstacleInfo> staticObstacleMemory = new ConcurrentHashMap<>();
-
-  private final Map<String, ObstacleMemory> obstacleMemories = new ConcurrentHashMap<>();
-
-  private final Map<String, AgentZoneMemory> agentZoneMemories = new ConcurrentHashMap<>();
 
   // Add ZoneInfo class
   private static class ZoneInfo {
@@ -96,64 +92,130 @@ public class RandomMovement {
     }
   }
 
-  // Add zoneMemory field
-  private final Map<Point, ZoneInfo> zoneMemory = new ConcurrentHashMap<>();
+  // Add these constants for improved collision handling
+  private static final int COLLISION_MEMORY_SIZE = 5;
+  private static final int STUCK_THRESHOLD = 3;
+  private static final double BLOCK_CARRIER_BUFFER = 2.0;
+  private static final int MAX_RECOVERY_ATTEMPTS = 3;
 
-  private static class EntropyMap {
-    private final Map<Point, Double> heatMap = new HashMap<>();
-    private long lastCleanup = System.currentTimeMillis();
+  // Add these constants
+  private static final int MAX_BOUNDARY_ATTEMPTS = 5;
+  private static final double BOUNDARY_ESCAPE_CHANCE = 0.8;
 
-    void updateHeat(Point pos) {
-      heatMap.merge(pos, 1.0, Double::sum);
-      cleanup();
-    }
+  private static final double AGENT_AVOIDANCE_WEIGHT = 0.4;
+  private static final int AGENT_CRITICAL_DISTANCE = 1; // Direct adjacency
+  private static final int AGENT_AWARENESS_DISTANCE = 3; // Awareness radius
 
-    private void cleanup() {
-      if (System.currentTimeMillis() - lastCleanup > 10000) {
-        heatMap.entrySet().removeIf(entry -> entry.getValue() < 0.1);
-        lastCleanup = System.currentTimeMillis();
-      }
-    }
-
-    double getHeat(Point pos) {
-      return heatMap.getOrDefault(pos, 0.0);
-    }
-
-    void decayHeat() {
-      heatMap.replaceAll((k, v) -> v * ENTROPY_DECAY);
-    }
-  }
-
-  private static class DirectionMemory {
+  private class DirectionMemory {
     private final Deque<String> lastMoves = new ArrayDeque<>(MEMORY_SIZE);
     private Point lastPosition;
     private int stuckCount = 0;
+    private int recoveryAttempts = 0;
+    private long lastStuckTime = 0;
+    private Set<String> failedDirections = new HashSet<>();
 
     // Add weight fields
     public double obstacleWeight = BASE_OBSTACLE_WEIGHT;
     public double entropyWeight = BASE_ENTROPY_WEIGHT;
     public double momentumWeight = BASE_MOMENTUM_WEIGHT;
 
-    void addMove(String direction, Point newPosition) {
+    // Add these fields
+    private int boundaryAttempts = 0;
+    private boolean isOnBoundary = false;
+    private String lastBoundaryDirection = null;
+
+    void addMove(String direction) {
       if (lastMoves.size() >= MEMORY_SIZE) {
         lastMoves.removeLast();
       }
       lastMoves.addFirst(direction);
-
-      if (lastPosition != null && lastPosition.equals(newPosition)) {
-        stuckCount++;
-      } else {
-        stuckCount = 0;
-      }
-      lastPosition = newPosition;
-    }
-
-    boolean isStuck() {
-      return stuckCount >= 3;
     }
 
     String getLastDirection() {
       return lastMoves.isEmpty() ? null : lastMoves.getFirst();
+    }
+
+    void recordCollision(String direction) {
+      failedDirections.add(direction);
+      stuckCount++;
+      lastStuckTime = System.currentTimeMillis();
+    }
+
+    void clearCollisionMemory() {
+      failedDirections.clear();
+      stuckCount = 0;
+      recoveryAttempts = 0;
+    }
+
+    boolean shouldAttemptRecovery() {
+      return isStuck() && recoveryAttempts < MAX_RECOVERY_ATTEMPTS;
+    }
+
+    String getRecoveryDirection(
+      List<String> availableDirections,
+      String lastDirection
+    ) {
+      recoveryAttempts++;
+
+      // Special handling for boundary stuck situations
+      if (isOnBoundary) {
+        boundaryAttempts++;
+        if (boundaryAttempts > MAX_BOUNDARY_ATTEMPTS) {
+          // Force a move away from boundary
+          String escapeDir = getOppositeDirection(lastBoundaryDirection);
+          if (availableDirections.contains(escapeDir)) {
+            boundaryAttempts = 0;
+            isOnBoundary = false;
+            return escapeDir;
+          }
+        }
+
+        // Try to move along the boundary
+        List<String> parallelDirs = getParallelDirections(
+          lastBoundaryDirection
+        );
+        parallelDirs.retainAll(availableDirections);
+        if (
+          !parallelDirs.isEmpty() &&
+          random.nextDouble() < BOUNDARY_ESCAPE_CHANCE
+        ) {
+          return parallelDirs.get(random.nextInt(parallelDirs.size()));
+        }
+      }
+
+      // Existing recovery logic
+      List<String> safeDirections = availableDirections
+        .stream()
+        .filter(d -> !failedDirections.contains(d))
+        .collect(Collectors.toList());
+
+      if (safeDirections.isEmpty()) {
+        failedDirections.clear();
+        return getOppositeDirection(lastDirection);
+      }
+
+      List<String> perpendicularDirs = getPerpendicularDirections(
+        lastDirection
+      );
+      perpendicularDirs.retainAll(safeDirections);
+
+      if (!perpendicularDirs.isEmpty()) {
+        return perpendicularDirs.get(random.nextInt(perpendicularDirs.size()));
+      }
+
+      return safeDirections.get(random.nextInt(safeDirections.size()));
+    }
+
+    void setBoundaryState(boolean onBoundary, String boundaryDir) {
+      this.isOnBoundary = onBoundary;
+      this.lastBoundaryDirection = boundaryDir;
+      if (!onBoundary) {
+        boundaryAttempts = 0;
+      }
+    }
+
+    boolean isStuck() {
+      return stuckCount >= 3;
     }
   }
 
@@ -213,120 +275,141 @@ public class RandomMovement {
     }
   }
 
-  public RandomMovement(Map<String, LocalMap> agentMaps) {
-    this.agentMaps = agentMaps;
+  private static class EntropyMap {
+    private final Map<Point, Double> heatMap = new HashMap<>();
+    private long lastCleanup = System.currentTimeMillis();
+
+    void updateHeat(Point pos) {
+      heatMap.merge(pos, 1.0, Double::sum);
+      cleanup();
+    }
+
+    private void cleanup() {
+      if (System.currentTimeMillis() - lastCleanup > 10000) {
+        heatMap.entrySet().removeIf(entry -> entry.getValue() < 0.1);
+        lastCleanup = System.currentTimeMillis();
+      }
+    }
+
+    double getHeat(Point pos) {
+      return heatMap.getOrDefault(pos, 0.0);
+    }
+
+    void decayHeat() {
+      heatMap.replaceAll((k, v) -> v * ENTROPY_DECAY);
+    }
   }
 
-  public String getNextDirection(String agName) {
-    try {
-      if (agName == null) {
-        logger.warning("Null agent name provided to getNextDirection");
-        return getDefaultDirection();
-      }
+  // This is the method called by RequestGuidance
+  public String getNextDirection(String agName, LocalMap map) {
+    if (map == null) {
+      logger.warning("Map is null for agent " + agName);
+      return "n"; // Default direction
+    }
+    return getNextMove(agName, map);
+  }
 
-      LocalMap map = agentMaps.get(agName);
-      if (map == null) {
-        logger.warning("No map found for agent: " + agName);
-        return getDefaultDirection();
-      }
+  private String getNextMove(String agName, LocalMap map) {
+    DirectionMemory memory = directionMemory.computeIfAbsent(
+      agName,
+      k -> new DirectionMemory()
+    );
 
-      Point currentPos = map.getCurrentPosition();
-      if (currentPos == null) {
-        logger.warning("No current position for agent: " + agName);
-        return getDefaultDirection();
-      }
+    Point currentPos = map.getCurrentPosition();
+    String intendedDirection = calculateIntendedDirection(
+      agName,
+      map,
+      currentPos,
+      memory
+    );
 
-      DirectionMemory memory = directionMemory.computeIfAbsent(
-        agName,
-        k -> new DirectionMemory()
-      );
+    String resolvedDirection = collisionHandler.resolveCollision(
+      agName,
+      currentPos,
+      intendedDirection,
+      map,
+      false
+    );
 
+    if (resolvedDirection != null) {
+      memory.addMove(resolvedDirection);
+    }
+
+    return resolvedDirection;
+  }
+
+  private String calculateIntendedDirection(
+    String agName,
+    LocalMap map,
+    Point currentPos,
+    DirectionMemory memory
+  ) {
+    List<String> availableDirections = getAvailableDirections(map, currentPos);
+    if (availableDirections.isEmpty()) {
+      return "skip";
+    }
+
+    Map<String, Double> scores = new HashMap<>();
+    for (String direction : availableDirections) {
+      Point targetPos = calculateNextPosition(currentPos, direction);
+      if (targetPos == null) continue;
+
+      double score = evaluatePosition(targetPos, map, memory);
+
+      // Entropy factor
       EntropyMap entropyMap = entropyMaps.computeIfAbsent(
         agName,
         k -> new EntropyMap()
       );
+      score *= (1.0 - entropyMap.getHeat(targetPos));
 
-      // Get available directions with error handling
-      List<String> availableDirections = getAvailableDirections(
-        map,
-        currentPos
-      );
-      if (availableDirections.isEmpty()) {
-        logger.warning(
-          String.format(
-            "[RandomMovement] %s: No available directions at position %s",
-            agName,
-            currentPos
-          )
-        );
-        return getDefaultDirection();
+      // Momentum factor
+      if (direction.equals(memory.getLastDirection())) {
+        score *= 1.2;
       }
 
-      try {
-        // Get exploration recommendation
-        String explorationDir = Exploration.getRecommendedDirection(
-          agName,
-          map,
-          currentPos
-        );
+      // Randomization
+      score *= (0.9 + random.nextDouble() * 0.2);
 
-        // Calculate scores with error handling
-        Map<String, Double> scores = calculateDirectionScores(
-          agName,
-          map,
-          currentPos,
-          availableDirections,
-          explorationDir,
-          memory,
-          entropyMap
-        );
-
-        // Select direction with highest score
-        String chosenDirection = selectBestDirection(
-          scores,
-          availableDirections
-        );
-
-        // Update memory and entropy safely
-        updateMovementMemory(
-          agName,
-          currentPos,
-          chosenDirection,
-          memory,
-          entropyMap
-        );
-
-        logger.fine(
-          String.format(
-            "[RandomMovement] %s: Scores - %s, chose: %s at position %s",
-            agName,
-            scores,
-            chosenDirection,
-            currentPos
-          )
-        );
-
-        return chosenDirection;
-      } catch (Exception e) {
-        logger.warning(
-          String.format(
-            "Error calculating direction for agent %s: %s",
-            agName,
-            e.getMessage()
-          )
-        );
-        return getRandomDirection(availableDirections);
-      }
-    } catch (Exception e) {
-      logger.severe(
-        String.format(
-          "Critical error in getNextDirection for agent %s: %s",
-          agName,
-          e.getMessage()
-        )
-      );
-      return getDefaultDirection();
+      scores.put(direction, score);
     }
+
+    return scores
+      .entrySet()
+      .stream()
+      .max(Map.Entry.comparingByValue())
+      .map(Map.Entry::getKey)
+      .orElse(
+        availableDirections.get(random.nextInt(availableDirections.size()))
+      );
+  }
+
+  private double evaluatePosition(
+    Point targetPos,
+    LocalMap map,
+    DirectionMemory memory
+  ) {
+    double score = 1.0;
+
+    // Consider open spaces
+    int openSpaces = countAdjacentOpenSpaces(targetPos, map);
+    score *= (1.0 + (openSpaces / 8.0));
+
+    return score;
+  }
+
+  private int countAdjacentOpenSpaces(Point pos, LocalMap map) {
+    int count = 0;
+    for (int dx = -1; dx <= 1; dx++) {
+      for (int dy = -1; dy <= 1; dy++) {
+        if (dx == 0 && dy == 0) continue;
+        Point checkPos = new Point(pos.x + dx, pos.y + dy);
+        if (!map.hasObstacle(checkPos)) {
+          count++;
+        }
+      }
+    }
+    return count;
   }
 
   private String getDefaultDirection() {
@@ -416,7 +499,7 @@ public class RandomMovement {
     try {
       Point newPos = calculateNextPosition(currentPos, chosenDirection);
       if (newPos != null) {
-        memory.addMove(chosenDirection, newPos);
+        memory.addMove(chosenDirection);
         entropyMap.updateHeat(newPos);
         entropyMap.decayHeat();
       }
@@ -889,7 +972,7 @@ public class RandomMovement {
   }
 
   private String detectBoundaryDirection(LocalMap map) {
-    Map<String, Point> boundaries = map.getConfirmedBoundaries();
+    Map<String, Point> boundaries = map.getConfirmedBoundariesPositions();
     if (boundaries.isEmpty()) return null;
 
     Point currentPos = map.getCurrentPosition();
@@ -1058,5 +1141,281 @@ public class RandomMovement {
       default:
         return current;
     }
+  }
+
+  private boolean isNearBlockCarrier(LocalMap map, Point pos) {
+    return map
+      .getDynamicObstacles()
+      .values()
+      .stream()
+      .anyMatch(
+        obs ->
+          obs.hasBlock() &&
+          euclideanDistance(pos, obs.getPosition()) <= BLOCK_CARRIER_BUFFER
+      );
+  }
+
+  private String handleBlockCarrierCollision(
+    DirectionMemory memory,
+    List<String> availableDirections
+  ) {
+    // Prioritize moving away from block carriers
+    String lastDir = memory.getLastDirection();
+    if (lastDir != null) {
+      String oppositeDir = getOppositeDirection(lastDir);
+      if (availableDirections.contains(oppositeDir)) {
+        return oppositeDir;
+      }
+    }
+    return memory.getRecoveryDirection(availableDirections, lastDir);
+  }
+
+  private List<String> getPerpendicularDirections(String direction) {
+    List<String> perpendicular = new ArrayList<>();
+    if (direction == null) return perpendicular;
+
+    switch (direction) {
+      case "n":
+      case "s":
+        perpendicular.add("e");
+        perpendicular.add("w");
+        break;
+      case "e":
+      case "w":
+        perpendicular.add("n");
+        perpendicular.add("s");
+        break;
+    }
+    return perpendicular;
+  }
+
+  private String calculateBestDirection(
+    String agName,
+    LocalMap map,
+    Point currentPos,
+    DirectionMemory memory
+  ) {
+    List<String> availableDirections = getAvailableDirections(map, currentPos);
+    if (availableDirections.isEmpty()) {
+      return getDefaultDirection();
+    }
+
+    // Check for immediate agent collision
+    if (isNearAgent(currentPos, map)) {
+      String collisionResolution = handleAgentCollision(
+        memory,
+        availableDirections,
+        map
+      );
+      if (collisionResolution != null) {
+        return collisionResolution;
+      }
+    }
+
+    // Regular direction scoring
+    Map<String, Double> scores = new HashMap<>();
+    for (String direction : availableDirections) {
+      Point targetPos = calculateNextPosition(currentPos, direction);
+      if (targetPos == null) continue;
+
+      double score = evaluatePosition(targetPos, map, memory);
+
+      // Add momentum factor
+      if (direction.equals(memory.getLastDirection())) {
+        score *= 1.2;
+      }
+
+      // Add randomization factor
+      score *= (0.9 + random.nextDouble() * 0.2);
+
+      scores.put(direction, score);
+    }
+
+    return scores
+      .entrySet()
+      .stream()
+      .max(Map.Entry.comparingByValue())
+      .map(Map.Entry::getKey)
+      .orElse(getDefaultDirection());
+  }
+
+  private boolean isMovePossible(
+    LocalMap map,
+    Point currentPos,
+    String direction
+  ) {
+    if (direction == null) return false;
+    Point nextPos = calculateNextPosition(currentPos, direction);
+    return !map.hasObstacle(nextPos) && !map.isOutOfBounds(nextPos);
+  }
+
+  // Add this helper method
+  private List<String> getParallelDirections(String boundaryDirection) {
+    List<String> parallel = new ArrayList<>();
+    if (boundaryDirection == null) return parallel;
+
+    switch (boundaryDirection) {
+      case "n":
+      case "s":
+        parallel.add("e");
+        parallel.add("w");
+        break;
+      case "e":
+      case "w":
+        parallel.add("n");
+        parallel.add("s");
+        break;
+    }
+    return parallel;
+  }
+
+  private String selectSafeDirection(
+    List<String> availableDirections,
+    LocalMap map
+  ) {
+    // Filter out directions that would hit boundaries
+    List<String> safeDirections = availableDirections
+      .stream()
+      .filter(dir -> !MovementUtils.wouldHitBoundary(map, dir))
+      .collect(Collectors.toList());
+
+    if (safeDirections.isEmpty()) {
+      // All directions hit boundaries, fall back to original list
+      return getRandomDirection(availableDirections);
+    }
+
+    return getRandomDirection(safeDirections);
+  }
+
+  private boolean isNearBoundary(Point pos, LocalMap map) {
+    Map<String, Point> boundaries = map.getConfirmedBoundariesPositions();
+    if (boundaries.isEmpty()) {
+      return false;
+    }
+
+    for (Map.Entry<String, Point> entry : boundaries.entrySet()) {
+      String direction = entry.getKey();
+      Point boundary = entry.getValue();
+
+      // Calculate distance to boundary
+      int distance;
+      switch (direction) {
+        case "n":
+          distance = Math.abs(pos.y - boundary.y);
+          if (distance <= BOUNDARY_AWARENESS) return true;
+          break;
+        case "s":
+          distance = Math.abs(pos.y - boundary.y);
+          if (distance <= BOUNDARY_AWARENESS) return true;
+          break;
+        case "e":
+          distance = Math.abs(pos.x - boundary.x);
+          if (distance <= BOUNDARY_AWARENESS) return true;
+          break;
+        case "w":
+          distance = Math.abs(pos.x - boundary.x);
+          if (distance <= BOUNDARY_AWARENESS) return true;
+          break;
+      }
+    }
+    return false;
+  }
+
+  private double evaluatePosition(Point targetPos, LocalMap map) {
+    double score = 1.0;
+
+    // Boundary avoidance
+    if (isNearBoundary(targetPos, map)) {
+      score *= 0.2;
+    }
+
+    // Consider open spaces
+    int openSpaces = countAdjacentOpenSpaces(targetPos, map);
+    score *= (1.0 + (openSpaces / 8.0));
+
+    return score;
+  }
+
+  private boolean isParallelMovement(
+    Point current,
+    Point target,
+    Point otherAgent
+  ) {
+    // Check if movement is perpendicular to the line between agents
+    int dx = target.x - current.x;
+    int dy = target.y - current.y;
+    int ax = otherAgent.x - current.x;
+    int ay = otherAgent.y - current.y;
+
+    // Calculate dot product
+    double dotProduct =
+      (dx * ax + dy * ay) /
+      (Math.sqrt(dx * dx + dy * dy) * Math.sqrt(ax * ax + ay * ay));
+
+    // Consider movement parallel if angle is close to 90 degrees
+    return Math.abs(dotProduct) < 0.3; // About 75 degrees
+  }
+
+  private String handleAgentCollision(
+    DirectionMemory memory,
+    List<String> availableDirections,
+    LocalMap map
+  ) {
+    Point currentPos = map.getCurrentPosition();
+    Map<Point, ObstacleInfo> dynamicObstacles = map.getDynamicObstacles();
+
+    // Find closest agent
+    Point closestAgent = null;
+    double minDistance = Double.MAX_VALUE;
+
+    for (ObstacleInfo obstacle : dynamicObstacles.values()) {
+      if (obstacle.isDynamic()) {
+        double distance = euclideanDistance(currentPos, obstacle.getPosition());
+        if (distance < minDistance) {
+          minDistance = distance;
+          closestAgent = obstacle.getPosition();
+        }
+      }
+    }
+
+    if (closestAgent == null) return null;
+
+    // Get perpendicular directions to move away
+    List<String> perpendicularDirs = getPerpendicularDirections(
+      getDirectionBetweenPoints(currentPos, closestAgent)
+    );
+
+    // Filter available perpendicular directions
+    perpendicularDirs.retainAll(availableDirections);
+
+    if (!perpendicularDirs.isEmpty()) {
+      return perpendicularDirs.get(random.nextInt(perpendicularDirs.size()));
+    }
+
+    return null;
+  }
+
+  private String getDirectionBetweenPoints(Point from, Point to) {
+    int dx = to.x - from.x;
+    int dy = to.y - from.y;
+
+    if (Math.abs(dx) > Math.abs(dy)) {
+      return dx > 0 ? "e" : "w";
+    } else {
+      return dy > 0 ? "s" : "n";
+    }
+  }
+
+  private boolean isNearAgent(Point pos, LocalMap map) {
+    for (ObstacleInfo obstacle : map.getDynamicObstacles().values()) {
+      if (
+        obstacle.isDynamic() &&
+        euclideanDistance(pos, obstacle.getPosition()) <=
+        AGENT_AWARENESS_DISTANCE
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 }

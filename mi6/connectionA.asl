@@ -23,19 +23,27 @@
 +step(X) : true & attached(_,_) <- !move_random(goal).
 
 //attaching blocks
-+step(X) : thing(1,0,block,_) <- attach(e).
-+step(X) : thing(0,1,block,_) <- attach(s).
-+step(X) : thing(-1,0,block,_) <- attach(w).
-+step(X) : thing(0,-1,block,_) <- attach(n).
++step(X) : thing(1,0,block,_) & thing(1,0,dispenser,_) <- attach(e).
++step(X) : thing(0,1,block,_) & thing(0,1,dispenser,_) <- attach(s).
++step(X) : thing(-1,0,block,_) & thing(-1,0,dispenser,_) <- attach(w).
++step(X) : thing(0,-1,block,_) & thing(0,-1,dispenser,_) <- attach(n).
 
 //requesting blocks
-+step(X) : thing(1,0,dispenser,_) <- request(e).
-+step(X) : thing(0,1,dispenser,_) <- request(s).
-+step(X) : thing(-1,0,dispenser,_) <- request(w).
-+step(X) : thing(0,-1,dispenser,_) <- request(n).
++step(X) : thing(1,0,dispenser,_) & not attached(_,_) <- request(e).
++step(X) : thing(0,1,dispenser,_) & not attached(_,_) <- request(s).
++step(X) : thing(-1,0,dispenser,_) & not attached(_,_) <- request(w).
++step(X) : thing(0,-1,dispenser,_) & not attached(_,_) <- request(n).
 
 +step(X) : true <- 
 	!move_random(dispenser).
+
++actionResult(move,failed_path)[source(percept)] : true <-
+    .print("Move failed: path blocked");
+    helpermodels.AddMovementFailure(failed_path).
+
++actionResult(move,failed_forbidden)[source(percept)] : true <-
+    .print("Move failed: boundary detected");
+    helpermodels.AddMovementFailure(failed_forbidden).
 
 +!move_random(Target): helpermodels.RequestGuidance(Target,1,Dir)
 <-  .print("Moving towards dispenser: ", Dir);

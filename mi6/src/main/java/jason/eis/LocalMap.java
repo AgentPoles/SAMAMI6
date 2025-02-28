@@ -55,11 +55,18 @@ public class LocalMap {
 
   private final Map<String, BoundaryInfo> confirmedBoundaries = new HashMap<>();
   private final Map<Point, ObstacleInfo> staticObstacles = new HashMap<>();
-
+  private final Map<Point, Integer> temporaryObstacles = new HashMap<>();
   // Add these collections if they don't exist
   private final Map<Point, Entity> dispensers = new HashMap<>();
   private final Map<Point, Entity> blocks = new HashMap<>();
   private final Map<Point, Entity> goals = new HashMap<>();
+
+  // Add constants for boundary and obstacle handling
+  private static final int BOUNDARY_CONFIRMATION_THRESHOLD = 2;
+  private static final int TEMP_OBSTACLE_TTL = 5; // Time-to-live in steps
+
+  // Add tracking maps
+  private Point lastAttemptedMove = null;
 
   public enum EntityType {
     DISPENSER,
@@ -247,6 +254,7 @@ public class LocalMap {
     private final String type;
     private final boolean isDynamic;
     private Point lastPosition; // Add last position tracking
+    private boolean hasBlock = false;
 
     public ObstacleInfo(Point pos, String type, boolean isDynamic) {
       this.position = pos;
@@ -290,6 +298,14 @@ public class LocalMap {
 
     public boolean isDynamic() {
       return isDynamic;
+    }
+
+    public boolean hasBlock() {
+      return hasBlock;
+    }
+
+    public void setHasBlock(boolean hasBlock) {
+      this.hasBlock = hasBlock;
     }
   }
 
@@ -1065,11 +1081,15 @@ public class LocalMap {
     return info != null ? info.position : null;
   }
 
-  public Map<String, Point> getConfirmedBoundaries() {
+  public Map<String, BoundaryInfo> getConfirmedBoundaries() {
+    return new HashMap<>(confirmedBoundaries);
+  }
+
+  public Map<String, Point> getConfirmedBoundariesPositions() {
     Map<String, Point> boundaries = new HashMap<>();
-    confirmedBoundaries.forEach(
-      (dir, info) -> boundaries.put(dir, info.position)
-    );
+    for (Map.Entry<String, BoundaryInfo> entry : confirmedBoundaries.entrySet()) {
+      boundaries.put(entry.getKey(), entry.getValue().position);
+    }
     return boundaries;
   }
 
@@ -1270,5 +1290,131 @@ public class LocalMap {
     dispensers.remove(pos);
     blocks.remove(pos);
     goals.remove(pos);
+  }
+
+  public boolean isNearBoundary(Point pos) {
+    Map<String, Point> boundaries = getConfirmedBoundariesPositions();
+    if (boundaries.isEmpty()) {
+      return false;
+    }
+
+    for (Point boundary : boundaries.values()) {
+      if (
+        Math.abs(pos.x - boundary.x) <= AWARENESS_DISTANCE ||
+        Math.abs(pos.y - boundary.y) <= AWARENESS_DISTANCE
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  public void handleBoundaryFailure() {
+    try {
+      Point currentPos = getCurrentPosition();
+      if (currentPos == null) {
+        logger.warning("Cannot handle boundary failure - no current position");
+        return;
+      }
+
+      // Determine the direction that caused the boundary hit
+      String direction = lastAttemptedMove != null
+        ? getDirectionFromPositions(currentPos, lastAttemptedMove)
+        : null;
+
+      if (direction != null) {
+        // Use existing recordBoundary method which handles all the boundary logic
+        recordBoundary(direction, currentPos);
+        logger.info("Boundary failure handled in direction: " + direction);
+      }
+    } catch (Exception e) {
+      logger.severe("Error in handleBoundaryFailure: " + e.getMessage());
+    }
+  }
+
+  public void handlePathFailure() {
+    try {
+      if (lastAttemptedMove != null) {
+        recordStaticObstacle(lastAttemptedMove);
+        logger.info("Static obstacle recorded at " + lastAttemptedMove);
+      }
+    } catch (Exception e) {
+      logger.severe("Error in handlePathFailure: " + e.getMessage());
+    }
+  }
+
+  private String getDirectionFromPositions(Point from, Point to) {
+    if (from == null || to == null) return null;
+
+    int dx = to.x - from.x;
+    int dy = to.y - from.y;
+
+    if (dx > 0) return "e";
+    if (dx < 0) return "w";
+    if (dy > 0) return "s";
+    if (dy < 0) return "n";
+
+    return null;
+  }
+
+  private void cleanupTemporaryObstacles() {
+    // Decrease TTL and remove expired obstacles
+    temporaryObstacles
+      .entrySet()
+      .removeIf(
+        entry -> {
+          entry.setValue(entry.getValue() - 1);
+          return entry.getValue() <= 0;
+        }
+      );
+  }
+
+  private void updateMapBounds(Point currentPos, String direction) {
+    if (direction == null) return;
+
+    // Update map bounds based on confirmed boundary
+    switch (direction) {
+      case "n":
+        if (
+          mapMinBounds == null || currentPos.y < mapMinBounds.y
+        ) mapMinBounds =
+          new Point(
+            mapMinBounds != null ? mapMinBounds.x : currentPos.x,
+            currentPos.y
+          );
+        break;
+      case "s":
+        if (
+          mapMaxBounds == null || currentPos.y > mapMaxBounds.y
+        ) mapMaxBounds =
+          new Point(
+            mapMaxBounds != null ? mapMaxBounds.x : currentPos.x,
+            currentPos.y
+          );
+        break;
+      case "w":
+        if (
+          mapMinBounds == null || currentPos.x < mapMinBounds.x
+        ) mapMinBounds =
+          new Point(
+            currentPos.x,
+            mapMinBounds != null ? mapMinBounds.y : currentPos.y
+          );
+        break;
+      case "e":
+        if (
+          mapMaxBounds == null || currentPos.x > mapMaxBounds.x
+        ) mapMaxBounds =
+          new Point(
+            currentPos.x,
+            mapMaxBounds != null ? mapMaxBounds.y : currentPos.y
+          );
+        break;
+    }
+  }
+
+  // Track attempted moves
+  public void setLastAttemptedMove(Point target) {
+    this.lastAttemptedMove = target;
   }
 }

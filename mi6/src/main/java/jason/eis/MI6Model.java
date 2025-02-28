@@ -210,7 +210,7 @@ public class MI6Model {
 
     LocalMap.DEBUG = true;
 
-    this.randomMovement = new RandomMovement(agentMaps);
+    this.randomMovement = new RandomMovement();
     this.plannedMovement = new PlannedMovement();
 
     instance = this;

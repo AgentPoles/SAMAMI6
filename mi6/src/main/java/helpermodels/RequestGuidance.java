@@ -98,19 +98,19 @@ public class RequestGuidance extends DefaultInternalAction {
       final LocalMap agentMap = model.getAgentMap(agName);
       if (agentMap == null) {
         logger.warning(String.format("[%s] Agent map is null", agName));
-        return fallbackToRandomMovement(agName, un, outputTerm);
+        return handleRandomMovement(agName, un, outputTerm);
       }
 
       final Point currentPos = agentMap.getCurrentPosition();
       if (currentPos == null) {
         logger.warning(String.format("[%s] Current position is null", agName));
-        return fallbackToRandomMovement(agName, un, outputTerm);
+        return handleRandomMovement(agName, un, outputTerm);
       }
 
       final PlannedMovement plannedMovement = model.getPlannedMovement();
       if (plannedMovement == null) {
         logger.warning(String.format("[%s] Planned movement is null", agName));
-        return fallbackToRandomMovement(agName, un, outputTerm);
+        return handleRandomMovement(agName, un, outputTerm);
       }
 
       // Check cooldown period
@@ -127,7 +127,7 @@ public class RequestGuidance extends DefaultInternalAction {
             )
           );
         }
-        return fallbackToRandomMovement(agName, un, outputTerm);
+        return handleRandomMovement(agName, un, outputTerm);
       }
 
       try {
@@ -222,7 +222,7 @@ public class RequestGuidance extends DefaultInternalAction {
       if (DEBUG) logger.info(
         String.format("[%s] Falling back to random movement", agName)
       );
-      return fallbackToRandomMovement(agName, un, outputTerm);
+      return handleRandomMovement(agName, un, outputTerm);
     } catch (Exception e) {
       logger.severe(
         String.format(
@@ -232,11 +232,11 @@ public class RequestGuidance extends DefaultInternalAction {
         )
       );
       // Always ensure we return a valid movement
-      return fallbackToRandomMovement(agName, un, outputTerm);
+      return handleRandomMovement(agName, un, outputTerm);
     }
   }
 
-  private Object fallbackToRandomMovement(
+  private Object handleRandomMovement(
     String agName,
     Unifier un,
     Term outputTerm
@@ -244,7 +244,8 @@ public class RequestGuidance extends DefaultInternalAction {
     try {
       MI6Model model = MI6Model.getInstance();
       RandomMovement randomMovement = model.getRandomMovement();
-      String randomDir = randomMovement.getNextDirection(agName);
+      LocalMap map = model.getAgentMap(agName);
+      String randomDir = randomMovement.getNextDirection(agName, map);
       if (randomDir == null) randomDir = "n"; // Default direction if all else fails
 
       if (DEBUG) {
