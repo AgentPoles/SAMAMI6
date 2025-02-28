@@ -45,12 +45,55 @@ public class RandomMovement {
   private static final int CORNER_AWARENESS = 4; // Extra awareness near corners
 
   // Zone-based exploration constants
-  private static final int ZONE_SIZE = 10;
-  private static final double ZONE_WEIGHT = 0.3;
-  private static final int MAX_ZONE_VISITS = 3;
+  private static final int ZONE_SIZE = 5;
+  private static final int ZONE_MEMORY = 10;
+  private static final double EXPLORATION_WEIGHT = 0.6;
+  private static final double UNEXPLORED_BONUS = 0.8;
 
   // Add this constant
   private static final double SAFETY_THRESHOLD = 3.0; // Distance threshold for safety calculations
+
+  // Add these constants
+  private static final int MAX_ZONE_VISITS = 2;
+  private static final double ZONE_WEIGHT = 0.5;
+
+  // Add repulsion from starting zone
+  private static final int STARTING_ZONE_REPULSION = 20; // Distance to maintain from start
+  private final Map<String, Point> startingZones = new ConcurrentHashMap<>();
+
+  private final Map<String, BoundaryState> boundaryStates = new ConcurrentHashMap<>();
+
+  private final Map<String, StaticObstacleInfo> staticObstacleMemory = new ConcurrentHashMap<>();
+
+  private final Map<String, ObstacleMemory> obstacleMemories = new ConcurrentHashMap<>();
+
+  private final Map<String, AgentZoneMemory> agentZoneMemories = new ConcurrentHashMap<>();
+
+  // Add ZoneInfo class
+  private static class ZoneInfo {
+    int visits = 0;
+    long lastVisitTime = 0;
+    double explorationScore = 1.0;
+
+    void visit() {
+      visits++;
+      lastVisitTime = System.currentTimeMillis();
+      explorationScore =
+        Math.max(0.2, 1.0 - (visits / (double) MAX_ZONE_VISITS));
+    }
+
+    void decay() {
+      // Gradually increase exploration score for zones not visited recently
+      long timeSinceVisit = System.currentTimeMillis() - lastVisitTime;
+      if (timeSinceVisit > 30000) { // 30 seconds
+        explorationScore = Math.min(1.0, explorationScore + 0.1);
+        visits = Math.max(0, visits - 1);
+      }
+    }
+  }
+
+  // Add zoneMemory field
+  private final Map<Point, ZoneInfo> zoneMemory = new ConcurrentHashMap<>();
 
   private static class EntropyMap {
     private final Map<Point, Double> heatMap = new HashMap<>();
@@ -119,8 +162,6 @@ public class RandomMovement {
     int spiralSteps = 1;
   }
 
-  private final Map<String, BoundaryState> boundaryStates = new ConcurrentHashMap<>();
-
   private static class StaticObstacleInfo {
     final Set<Point> nearbyObstacles = new HashSet<>();
     final Set<String> boundaryDirections = new HashSet<>();
@@ -133,33 +174,40 @@ public class RandomMovement {
     }
   }
 
-  private final Map<String, StaticObstacleInfo> staticObstacleMemory = new ConcurrentHashMap<>();
+  private static class AgentZoneMemory {
+    Deque<Point> visitedZones = new ArrayDeque<>(ZONE_MEMORY);
+    Map<Point, Integer> zoneVisits = new HashMap<>();
+    Point currentZone;
+    String targetDirection = null;
+    int stepsInCurrentZone = 0;
+    long zoneEntryTime = System.currentTimeMillis();
 
-  private final Map<String, ObstacleMemory> obstacleMemories = new ConcurrentHashMap<>();
+    void recordZone(Point zone) {
+      if (!zone.equals(currentZone)) {
+        if (visitedZones.size() >= ZONE_MEMORY) {
+          visitedZones.removeLast();
+        }
+        visitedZones.addFirst(zone);
+        currentZone = zone;
+        stepsInCurrentZone = 0;
+        zoneEntryTime = System.currentTimeMillis();
+      }
+      zoneVisits.merge(zone, 1, Integer::sum);
+      stepsInCurrentZone++;
 
-  private static class ZoneInfo {
-    int visits = 0;
-    long lastVisitTime = 0;
-    double explorationScore = 1.0;
-
-    void visit() {
-      visits++;
-      lastVisitTime = System.currentTimeMillis();
-      explorationScore =
-        Math.max(0.2, 1.0 - (visits / (double) MAX_ZONE_VISITS));
-    }
-
-    void decay() {
-      // Gradually increase exploration score for zones not visited recently
-      long timeSinceVisit = System.currentTimeMillis() - lastVisitTime;
-      if (timeSinceVisit > 30000) { // 30 seconds
-        explorationScore = Math.min(1.0, explorationScore + 0.1);
-        visits = Math.max(0, visits - 1);
+      // Force direction change if stuck in zone too long
+      if (System.currentTimeMillis() - zoneEntryTime > 5000) { // 5 seconds
+        targetDirection = null;
       }
     }
-  }
 
-  private final Map<Point, ZoneInfo> zoneMemory = new ConcurrentHashMap<>();
+    boolean isZoneOvervisited(Point zone) {
+      return (
+        stepsInCurrentZone > ZONE_SIZE ||
+        zoneVisits.getOrDefault(zone, 0) >= MAX_ZONE_VISITS
+      );
+    }
+  }
 
   public RandomMovement(Map<String, LocalMap> agentMaps) {
     this.agentMaps = agentMaps;
@@ -711,5 +759,171 @@ public class RandomMovement {
     }
 
     return closestBoundary;
+  }
+
+  private double calculateExplorationScore(
+    Point nextPos,
+    String agName,
+    LocalMap map
+  ) {
+    Point nextZone = getCurrentZone(nextPos);
+    AgentZoneMemory memory = agentZoneMemories.computeIfAbsent(
+      agName,
+      k -> new AgentZoneMemory()
+    );
+
+    // Record starting zone if not already recorded
+    Point startingZone = startingZones.computeIfAbsent(
+      agName,
+      k -> getCurrentZone(map.getCurrentPosition())
+    );
+
+    // Strong penalty for staying near starting zone
+    double startingZoneDistance = euclideanDistance(nextZone, startingZone);
+    if (startingZoneDistance < STARTING_ZONE_REPULSION) {
+      return -1.0 + (startingZoneDistance / STARTING_ZONE_REPULSION);
+    }
+
+    // Heavily penalize overvisited zones
+    if (memory.isZoneOvervisited(nextZone)) {
+      return -0.8;
+    }
+
+    // Higher bonus for unexplored zones
+    if (!memory.zoneVisits.containsKey(nextZone)) {
+      return UNEXPLORED_BONUS;
+    }
+
+    // Stronger penalties for recently visited zones
+    double recencyPenalty = 0;
+    int index = 0;
+    for (Point zone : memory.visitedZones) {
+      if (zone.equals(nextZone)) {
+        recencyPenalty = 0.2 * (ZONE_MEMORY - index) / ZONE_MEMORY;
+        break;
+      }
+      index++;
+    }
+
+    // Add diagonal movement bonus to encourage wider exploration
+    String directionToZone = getDirectionBetweenZones(
+      memory.currentZone,
+      nextZone
+    );
+    boolean isDiagonal = isDiagonalMove(directionToZone);
+    double diagonalBonus = isDiagonal ? 0.2 : 0;
+
+    return 0.3 - recencyPenalty + diagonalBonus;
+  }
+
+  private boolean isDiagonalMove(String direction) {
+    return direction.length() > 1; // Assuming diagonal moves are represented as "ne", "nw", "se", "sw"
+  }
+
+  private String getDirectionBetweenZones(Point from, Point to) {
+    StringBuilder direction = new StringBuilder();
+    if (to.y < from.y) direction.append("n");
+    if (to.y > from.y) direction.append("s");
+    if (to.x > from.x) direction.append("e");
+    if (to.x < from.x) direction.append("w");
+    return direction.toString();
+  }
+
+  private String chooseDirection(
+    String agName,
+    LocalMap map,
+    List<String> availableDirections
+  ) {
+    Point currentPos = map.getCurrentPosition();
+    Point currentZone = getCurrentZone(currentPos);
+    AgentZoneMemory memory = agentZoneMemories.get(agName);
+
+    if (memory == null) {
+      memory = new AgentZoneMemory();
+      agentZoneMemories.put(agName, memory);
+    }
+
+    // Record current zone
+    memory.recordZone(currentZone);
+
+    // Calculate scores for each direction
+    String bestDirection = null;
+    double bestScore = Double.NEGATIVE_INFINITY;
+
+    for (String direction : availableDirections) {
+      Point nextPos = calculateNextPosition(currentPos, direction);
+
+      double explorationScore = calculateExplorationScore(nextPos, agName, map);
+      double safetyScore = calculateSafetyScore(nextPos, map);
+      double entropyScore = calculateEntropyScore(
+        direction,
+        memory.visitedZones
+      );
+
+      // Combined score with weights
+      double score =
+        (explorationScore * EXPLORATION_WEIGHT) +
+        (safetyScore * 0.3) +
+        (entropyScore * 0.3);
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestDirection = direction;
+      }
+    }
+
+    return bestDirection;
+  }
+
+  private double calculateEntropyScore(
+    String direction,
+    Deque<Point> visitedZones
+  ) {
+    if (visitedZones.isEmpty()) return 1.0;
+
+    // Count direction changes in recent history
+    String lastDirection = null;
+    int changes = 0;
+    int total = 0;
+
+    Point lastZone = null;
+    for (Point zone : visitedZones) {
+      if (lastZone != null) {
+        String moveDirection = getDirectionBetweenZones(lastZone, zone);
+        if (lastDirection != null && !moveDirection.equals(lastDirection)) {
+          changes++;
+        }
+        lastDirection = moveDirection;
+        total++;
+      }
+      lastZone = zone;
+    }
+
+    // Encourage direction changes if movement has been too linear
+    double changeRatio = total > 0 ? (double) changes / total : 0;
+    if (
+      changeRatio < 0.3 &&
+      lastDirection != null &&
+      direction.equals(lastDirection)
+    ) {
+      return 0.2; // Penalize continuing in the same direction
+    }
+
+    return 0.8;
+  }
+
+  private Point calculateNextPosition(Point current, String direction) {
+    switch (direction) {
+      case "n":
+        return new Point(current.x, current.y - 1);
+      case "s":
+        return new Point(current.x, current.y + 1);
+      case "e":
+        return new Point(current.x + 1, current.y);
+      case "w":
+        return new Point(current.x - 1, current.y);
+      default:
+        return current;
+    }
   }
 }

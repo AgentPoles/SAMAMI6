@@ -13,10 +13,9 @@
 +thing(X,Y,entity,_)[source(percept)] : true <-
     helpermodels.AddOtherAgents(X, Y).
 
-+step(X) : true <-
-	.print("Received step percept.").
+
 	
-+actionID(X) : true <- 
++step(X) : true <- 
 	.print("Determining my action");
 	!move_random.
 
