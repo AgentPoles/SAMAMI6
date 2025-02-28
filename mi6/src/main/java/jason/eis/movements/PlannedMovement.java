@@ -12,9 +12,11 @@ public class PlannedMovement implements MovementStrategy {
   );
   private static final boolean DEBUG = true;
   private static final int MAX_SEARCH_RANGE = 50; // Configurable max range
+  private static final int PATH_TIMEOUT = 5000; // 5 seconds before recalculating path
+  private static final int MAX_TARGETS_TO_CHECK = 5;
+
   private final Search search;
   private final Map<String, MovementState> agentStates;
-  private static final int PATH_TIMEOUT = 5000; // 5 seconds before recalculating path
 
   public PlannedMovement() {
     this.search = new Search();
@@ -62,86 +64,251 @@ public class PlannedMovement implements MovementStrategy {
     Point currentPos,
     Search.TargetType targetType
   ) {
-    List<Point> targets = getTargetsOfType(map, targetType);
-    if (DEBUG) {
-      logger.info(
-        String.format(
-          "Finding nearest target from %s. Found %d targets of type %s",
-          currentPos,
-          targets.size(),
-          targetType
-        )
-      );
-    }
+    try {
+      if (map == null || currentPos == null || targetType == null) {
+        logger.warning(
+          "Invalid parameters in findNearestTarget: " +
+          String.format(
+            "map=%s, currentPos=%s, targetType=%s",
+            map != null ? "valid" : "null",
+            currentPos,
+            targetType
+          )
+        );
+        return null;
+      }
 
-    if (targets.isEmpty()) {
-      if (DEBUG) logger.info("No targets found");
+      List<Point> targets = getTargetsOfType(map, targetType);
+      if (targets.isEmpty()) {
+        if (DEBUG) logger.info("No targets found for type: " + targetType);
+        return null;
+      }
+
+      try {
+        // Sort targets by Manhattan distance
+        targets.sort(
+          (a, b) -> {
+            try {
+              int distA = getManhattanDistance(currentPos, a);
+              int distB = getManhattanDistance(currentPos, b);
+              return Integer.compare(distA, distB);
+            } catch (Exception e) {
+              logger.warning("Error comparing targets: " + e.getMessage());
+              return 0;
+            }
+          }
+        );
+
+        List<Point> nearestTargets = targets.subList(
+          0,
+          Math.min(MAX_TARGETS_TO_CHECK, targets.size())
+        );
+        return findBestTarget(currentPos, nearestTargets, map, targetType);
+      } catch (Exception e) {
+        logger.warning("Error processing targets: " + e.getMessage());
+        return null;
+      }
+    } catch (Exception e) {
+      logger.severe("Critical error in findNearestTarget: " + e.getMessage());
       return null;
     }
+  }
 
-    // First, sort targets by Manhattan distance to reduce pathfinding calls
-    targets.sort(
-      (a, b) -> {
-        int distA = Math.abs(a.x - currentPos.x) + Math.abs(a.y - currentPos.y);
-        int distB = Math.abs(b.x - currentPos.x) + Math.abs(b.y - currentPos.y);
-        return Integer.compare(distA, distB);
-      }
-    );
-
-    // Only check paths for the closest N targets
-    int maxTargetsToCheck = 5; // Adjust this value as needed
-    List<Point> nearestTargets = targets.subList(
-      0,
-      Math.min(maxTargetsToCheck, targets.size())
-    );
-
+  private Point findBestTarget(
+    Point currentPos,
+    List<Point> targets,
+    LocalMap map,
+    Search.TargetType targetType
+  ) {
     Point bestTarget = null;
     int minDistance = Integer.MAX_VALUE;
 
-    for (Point target : nearestTargets) {
-      int manhattanDist =
-        Math.abs(target.x - currentPos.x) + Math.abs(target.y - currentPos.y);
-      if (manhattanDist >= minDistance || manhattanDist > MAX_SEARCH_RANGE) {
-        continue;
-      }
-
-      Search.PathResult path = search.findPath(
-        currentPos,
-        target,
-        map,
-        targetType
-      );
-      if (path.success && path.points.size() < minDistance) {
-        minDistance = path.points.size();
-        bestTarget = target;
-        if (DEBUG) {
-          logger.info(
-            String.format(
-              "New best target found at %s with path length %d",
-              bestTarget,
-              minDistance
-            )
-          );
+    for (Point target : targets) {
+      try {
+        int manhattanDist = getManhattanDistance(currentPos, target);
+        if (manhattanDist >= minDistance || manhattanDist > MAX_SEARCH_RANGE) {
+          continue;
         }
+
+        Search.PathResult path = search.findPath(
+          currentPos,
+          target,
+          map,
+          targetType
+        );
+        if (path != null && path.success && path.points.size() < minDistance) {
+          minDistance = path.points.size();
+          bestTarget = target;
+          if (DEBUG) {
+            logger.info(
+              String.format(
+                "New best target found at %s with path length %d",
+                bestTarget,
+                minDistance
+              )
+            );
+          }
+        }
+      } catch (Exception e) {
+        logger.warning(
+          "Error evaluating target " + target + ": " + e.getMessage()
+        );
       }
     }
-
     return bestTarget;
+  }
+
+  @Override
+  public String getNextMove(String agName, LocalMap map) {
+    try {
+      if (agName == null || map == null) {
+        logger.warning("Invalid parameters in getNextMove");
+        return null;
+      }
+
+      MovementState state = agentStates.computeIfAbsent(
+        agName,
+        k -> new MovementState(null, null)
+      );
+
+      if (state.targetPosition == null) {
+        return null;
+      }
+
+      if (state.needsNewPath()) {
+        try {
+          Search.PathResult path = search.findPath(
+            map.getCurrentPosition(),
+            state.targetPosition,
+            map,
+            state.targetType
+          );
+
+          if (path != null && path.success) {
+            state.plannedPath = new ArrayList<>(path.directions); // Create defensive copy
+            state.pathCalculatedTime = System.currentTimeMillis();
+            state.currentPathIndex = 0;
+          } else {
+            return null;
+          }
+        } catch (Exception e) {
+          logger.warning("Error calculating new path: " + e.getMessage());
+          return null;
+        }
+      }
+
+      if (
+        state.plannedPath == null ||
+        state.plannedPath.isEmpty() ||
+        state.currentPathIndex >= state.plannedPath.size()
+      ) {
+        return null;
+      }
+
+      String nextMove = state.plannedPath.get(state.currentPathIndex);
+      state.currentPathIndex++;
+      return nextMove;
+    } catch (Exception e) {
+      logger.severe("Critical error in getNextMove: " + e.getMessage());
+      return null;
+    }
+  }
+
+  public String getNextMove(String agName) {
+    LocalMap map = MI6Model.getInstance().getAgentMap(agName);
+    return getNextMove(agName, map);
+  }
+
+  public void setTarget(String agName, Point target, Search.TargetType type) {
+    try {
+      if (agName == null) {
+        logger.warning("Null agent name in setTarget");
+        return;
+      }
+      MovementState state = new MovementState(target, type);
+      agentStates.put(agName, state);
+    } catch (Exception e) {
+      logger.warning("Error in setTarget: " + e.getMessage());
+    }
+  }
+
+  public void clearTarget(String agName) {
+    try {
+      if (agName != null) {
+        agentStates.remove(agName);
+      }
+    } catch (Exception e) {
+      logger.warning("Error clearing target: " + e.getMessage());
+    }
+  }
+
+  public boolean hasTarget(String agName) {
+    try {
+      return (
+        agName != null &&
+        agentStates.containsKey(agName) &&
+        agentStates.get(agName).targetPosition != null
+      );
+    } catch (Exception e) {
+      logger.warning("Error checking target: " + e.getMessage());
+      return false;
+    }
+  }
+
+  public void moveSucceeded(String agName) {
+    try {
+      MovementState state = agentStates.get(agName);
+      if (state != null) {
+        state.currentPathIndex++;
+      }
+    } catch (Exception e) {
+      logger.warning("Error in moveSucceeded: " + e.getMessage());
+    }
+  }
+
+  public void moveFailed(String agName) {
+    try {
+      if (agName != null) {
+        agentStates.remove(agName);
+      }
+    } catch (Exception e) {
+      logger.warning("Error in moveFailed: " + e.getMessage());
+    }
+  }
+
+  private int getManhattanDistance(Point p1, Point p2) {
+    if (p1 == null || p2 == null) {
+      throw new IllegalArgumentException(
+        "Cannot calculate distance with null points"
+      );
+    }
+    return Math.abs(p1.x - p2.x) + Math.abs(p1.y - p2.y);
   }
 
   private List<Point> getTargetsOfType(
     LocalMap map,
     Search.TargetType targetType
   ) {
-    switch (targetType) {
-      case DISPENSER:
-        return map.getDispensers();
-      case BLOCK:
-        return map.getBlocks();
-      case GOAL:
-        return map.getGoals();
-      default:
+    try {
+      if (map == null || targetType == null) {
+        logger.warning("Invalid parameters in getTargetsOfType");
         return new ArrayList<>();
+      }
+
+      switch (targetType) {
+        case DISPENSER:
+          return new ArrayList<>(map.getDispensers());
+        case BLOCK:
+          return new ArrayList<>(map.getBlocks());
+        case GOAL:
+          return new ArrayList<>(map.getGoals());
+        default:
+          logger.warning("Unknown target type: " + targetType);
+          return new ArrayList<>();
+      }
+    } catch (Exception e) {
+      logger.warning("Error getting targets: " + e.getMessage());
+      return new ArrayList<>();
     }
   }
 
@@ -166,79 +333,5 @@ public class PlannedMovement implements MovementStrategy {
       map,
       state.targetType
     );
-  }
-
-  @Override
-  public String getNextMove(String agName, LocalMap map) {
-    MovementState state = agentStates.computeIfAbsent(
-      agName,
-      k -> new MovementState(null, null)
-    );
-
-    if (state.targetPosition == null || state.needsNewPath()) {
-      // Don't try to pathfind if we don't have a target
-      if (state.targetPosition == null) {
-        return null;
-      }
-
-      Search.PathResult path = search.findPath(
-        map.getCurrentPosition(),
-        state.targetPosition,
-        map,
-        state.targetType
-      );
-
-      if (path.success) {
-        state.plannedPath = path.directions;
-        state.pathCalculatedTime = System.currentTimeMillis();
-        state.currentPathIndex = 0;
-      } else {
-        return null;
-      }
-    }
-
-    // Check bounds before accessing
-    if (
-      state.plannedPath.isEmpty() ||
-      state.currentPathIndex >= state.plannedPath.size()
-    ) {
-      return null;
-    }
-
-    String nextMove = state.plannedPath.get(state.currentPathIndex);
-    state.currentPathIndex++;
-    return nextMove;
-  }
-
-  public String getNextMove(String agName) {
-    LocalMap map = MI6Model.getInstance().getAgentMap(agName);
-    return getNextMove(agName, map);
-  }
-
-  public void setTarget(String agName, Point target, Search.TargetType type) {
-    MovementState state = new MovementState(target, type);
-    agentStates.put(agName, state);
-  }
-
-  public void clearTarget(String agName) {
-    agentStates.remove(agName);
-  }
-
-  public boolean hasTarget(String agName) {
-    return (
-      agentStates.containsKey(agName) &&
-      agentStates.get(agName).targetPosition != null
-    );
-  }
-
-  public void moveSucceeded(String agName) {
-    MovementState state = agentStates.get(agName);
-    if (state != null) {
-      state.currentPathIndex++;
-    }
-  }
-
-  public void moveFailed(String agName) {
-    agentStates.remove(agName);
   }
 }

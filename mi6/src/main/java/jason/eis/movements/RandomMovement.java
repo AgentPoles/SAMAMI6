@@ -6,9 +6,13 @@ import jason.eis.Point;
 import jason.eis.movements.ObstacleMemory;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 public class RandomMovement {
+  private static final Logger logger = Logger.getLogger(
+    RandomMovement.class.getName()
+  );
   private final Map<String, LocalMap> agentMaps;
   private final Map<String, DirectionMemory> directionMemory = new ConcurrentHashMap<>();
   private final Map<String, EntropyMap> entropyMaps = new ConcurrentHashMap<>();
@@ -214,100 +218,217 @@ public class RandomMovement {
   }
 
   public String getNextDirection(String agName) {
-    LocalMap map = agentMaps.get(agName);
-    if (map == null) return null;
+    try {
+      if (agName == null) {
+        logger.warning("Null agent name provided to getNextDirection");
+        return getDefaultDirection();
+      }
 
-    Point currentPos = map.getCurrentPosition();
-    DirectionMemory memory = directionMemory.computeIfAbsent(
-      agName,
-      k -> new DirectionMemory()
-    );
-    EntropyMap entropyMap = entropyMaps.computeIfAbsent(
-      agName,
-      k -> new EntropyMap()
-    );
+      LocalMap map = agentMaps.get(agName);
+      if (map == null) {
+        logger.warning("No map found for agent: " + agName);
+        return getDefaultDirection();
+      }
 
-    // Get available directions
-    List<String> availableDirections = getAvailableDirections(map, currentPos);
-    if (availableDirections.isEmpty()) {
-      System.out.println(
-        "[RandomMovement] " +
-        agName +
-        ": No available directions at position " +
+      Point currentPos = map.getCurrentPosition();
+      if (currentPos == null) {
+        logger.warning("No current position for agent: " + agName);
+        return getDefaultDirection();
+      }
+
+      DirectionMemory memory = directionMemory.computeIfAbsent(
+        agName,
+        k -> new DirectionMemory()
+      );
+
+      EntropyMap entropyMap = entropyMaps.computeIfAbsent(
+        agName,
+        k -> new EntropyMap()
+      );
+
+      // Get available directions with error handling
+      List<String> availableDirections = getAvailableDirections(
+        map,
         currentPos
       );
-      return null;
-    }
+      if (availableDirections.isEmpty()) {
+        logger.warning(
+          String.format(
+            "[RandomMovement] %s: No available directions at position %s",
+            agName,
+            currentPos
+          )
+        );
+        return getDefaultDirection();
+      }
 
-    // Get exploration recommendation
-    String explorationDir = Exploration.getRecommendedDirection(
-      agName,
-      map,
-      currentPos
-    );
+      try {
+        // Get exploration recommendation
+        String explorationDir = Exploration.getRecommendedDirection(
+          agName,
+          map,
+          currentPos
+        );
 
-    // Calculate scores for each direction
-    Map<String, Double> scores = new HashMap<>();
-    for (String direction : availableDirections) {
-      // Base scores (existing calculations)
-      double safetyScore =
-        getObstacleAvoidanceScore(
+        // Calculate scores with error handling
+        Map<String, Double> scores = calculateDirectionScores(
           agName,
           map,
           currentPos,
-          calculateNextPosition(currentPos, direction)
-        ) *
-        0.3;
-      double entropyScore =
-        (
-          1.0 - entropyMap.getHeat(calculateNextPosition(currentPos, direction))
-        ) *
-        0.15;
-      double momentumScore = getMomentumScore(direction, memory) * 0.15;
+          availableDirections,
+          explorationDir,
+          memory,
+          entropyMap
+        );
 
-      // Exploration score
-      double explorationScore = direction.equals(explorationDir) ? 0.4 : 0.0;
+        // Select direction with highest score
+        String chosenDirection = selectBestDirection(
+          scores,
+          availableDirections
+        );
 
-      // Combine scores with randomization factor
-      double randomFactor = random.nextDouble() * 0.1;
-      scores.put(
-        direction,
-        safetyScore +
-        entropyScore +
-        momentumScore +
-        explorationScore +
-        randomFactor
+        // Update memory and entropy safely
+        updateMovementMemory(
+          agName,
+          currentPos,
+          chosenDirection,
+          memory,
+          entropyMap
+        );
+
+        logger.fine(
+          String.format(
+            "[RandomMovement] %s: Scores - %s, chose: %s at position %s",
+            agName,
+            scores,
+            chosenDirection,
+            currentPos
+          )
+        );
+
+        return chosenDirection;
+      } catch (Exception e) {
+        logger.warning(
+          String.format(
+            "Error calculating direction for agent %s: %s",
+            agName,
+            e.getMessage()
+          )
+        );
+        return getRandomDirection(availableDirections);
+      }
+    } catch (Exception e) {
+      logger.severe(
+        String.format(
+          "Critical error in getNextDirection for agent %s: %s",
+          agName,
+          e.getMessage()
+        )
       );
+      return getDefaultDirection();
+    }
+  }
+
+  private String getDefaultDirection() {
+    return "n"; // Default fallback direction
+  }
+
+  private String getRandomDirection(List<String> availableDirections) {
+    if (availableDirections == null || availableDirections.isEmpty()) {
+      return getDefaultDirection();
+    }
+    return availableDirections.get(random.nextInt(availableDirections.size()));
+  }
+
+  private Map<String, Double> calculateDirectionScores(
+    String agName,
+    LocalMap map,
+    Point currentPos,
+    List<String> availableDirections,
+    String explorationDir,
+    DirectionMemory memory,
+    EntropyMap entropyMap
+  ) {
+    Map<String, Double> scores = new HashMap<>();
+
+    for (String direction : availableDirections) {
+      try {
+        Point nextPos = calculateNextPosition(currentPos, direction);
+        if (nextPos == null) continue;
+
+        double safetyScore = getObstacleAvoidanceScore(
+          agName,
+          map,
+          currentPos,
+          nextPos
+        );
+        double entropyScore = 1.0 - entropyMap.getHeat(nextPos);
+        double momentumScore = getMomentumScore(direction, memory);
+        double explorationScore = direction.equals(explorationDir) ? 0.4 : 0.0;
+
+        // Combine scores with randomization
+        double randomFactor = random.nextDouble() * 0.1;
+        scores.put(
+          direction,
+          (safetyScore * 0.3) +
+          (entropyScore * 0.15) +
+          (momentumScore * 0.15) +
+          explorationScore +
+          randomFactor
+        );
+      } catch (Exception e) {
+        logger.warning(
+          String.format(
+            "Error calculating score for direction %s: %s",
+            direction,
+            e.getMessage()
+          )
+        );
+        scores.put(direction, 0.0); // Safe default score
+      }
+    }
+    return scores;
+  }
+
+  private String selectBestDirection(
+    Map<String, Double> scores,
+    List<String> availableDirections
+  ) {
+    if (scores.isEmpty()) {
+      return getRandomDirection(availableDirections);
     }
 
-    // Select direction with highest score
-    String chosenDirection = scores
+    return scores
       .entrySet()
       .stream()
       .max(Map.Entry.comparingByValue())
       .map(Map.Entry::getKey)
-      .orElse(
-        availableDirections.get(random.nextInt(availableDirections.size()))
+      .orElseGet(() -> getRandomDirection(availableDirections));
+  }
+
+  private void updateMovementMemory(
+    String agName,
+    Point currentPos,
+    String chosenDirection,
+    DirectionMemory memory,
+    EntropyMap entropyMap
+  ) {
+    try {
+      Point newPos = calculateNextPosition(currentPos, chosenDirection);
+      if (newPos != null) {
+        memory.addMove(chosenDirection, newPos);
+        entropyMap.updateHeat(newPos);
+        entropyMap.decayHeat();
+      }
+    } catch (Exception e) {
+      logger.warning(
+        String.format(
+          "Error updating movement memory for agent %s: %s",
+          agName,
+          e.getMessage()
+        )
       );
-
-    // Update memory and entropy
-    Point newPos = calculateNextPosition(currentPos, chosenDirection);
-    memory.addMove(chosenDirection, newPos);
-    entropyMap.updateHeat(newPos);
-    entropyMap.decayHeat();
-
-    System.out.println(
-      "[RandomMovement] " +
-      agName +
-      ": Scores - " +
-      scores +
-      ", chose: " +
-      chosenDirection +
-      " at position " +
-      currentPos
-    );
-
-    return chosenDirection;
+    }
   }
 
   private List<String> getAvailableDirections(LocalMap map, Point currentPos) {
@@ -447,38 +568,6 @@ public class RandomMovement {
     }
 
     return direction.equals(lastDir) ? 0.8 : 0.4;
-  }
-
-  private String selectBestDirection(
-    Map<String, DirectionScore> scores,
-    DirectionMemory memory
-  ) {
-    // First, filter out immediately dangerous directions
-    List<DirectionScore> safeScores = scores
-      .values()
-      .stream()
-      .filter(score -> score.safetyScore > IMMEDIATE_DANGER_THRESHOLD)
-      .sorted(
-        (a, b) ->
-          Double.compare(b.getTotalScore(memory), a.getTotalScore(memory))
-      )
-      .collect(Collectors.toList());
-
-    // If we have safe directions, choose the best one
-    if (!safeScores.isEmpty()) {
-      return safeScores.get(0).direction;
-    }
-
-    // If no safe directions, choose the least dangerous one
-    return scores
-      .entrySet()
-      .stream()
-      .max(
-        (a, b) ->
-          Double.compare(a.getValue().safetyScore, b.getValue().safetyScore)
-      )
-      .map(Map.Entry::getKey)
-      .orElse(null);
   }
 
   private double euclideanDistance(Point p1, Point p2) {

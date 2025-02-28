@@ -4,6 +4,7 @@ import jason.asSemantics.DefaultInternalAction;
 import jason.asSemantics.TransitionSystem;
 import jason.asSemantics.Unifier;
 import jason.asSyntax.*;
+import jason.eis.LocalMap;
 import jason.eis.MI6Model;
 import jason.eis.Point;
 import jason.eis.movements.PlannedMovement;
@@ -13,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -59,36 +61,59 @@ public class RequestGuidance extends DefaultInternalAction {
   @Override
   public Object execute(TransitionSystem ts, Unifier un, Term[] terms)
     throws Exception {
+    final String agName = ts.getUserAgArch().getAgName();
+    final Term outputTerm = terms[terms.length - 1];
+    final AtomicReference<Search.TargetType> targetTypeRef = new AtomicReference<>();
+
     try {
-      String agName = ts.getUserAgArch().getAgName();
       MI6Model model = MI6Model.getInstance();
 
       if (DEBUG) logger.info(
         String.format("[%s] Starting RequestGuidance execution", agName)
       );
 
-      // Parse parameters
-      String targetTypeStr = ((Atom) terms[0]).getFunctor().toUpperCase();
+      // Validate input parameters
+      if (terms == null || terms.length < 2) {
+        throw new IllegalArgumentException("Invalid number of parameters");
+      }
 
-      // Convert ASL atoms to enum values in a single assignment
-      final Search.TargetType targetType = convertTargetType(
-        targetTypeStr,
-        agName
-      );
+      // Parse parameters with validation
+      if (!(terms[0] instanceof Atom)) {
+        throw new IllegalArgumentException("First parameter must be an Atom");
+      }
+      final String targetTypeStr = ((Atom) terms[0]).getFunctor().toUpperCase();
 
-      int size = (int) ((NumberTerm) terms[1]).solve();
-      Term outputTerm = terms[terms.length - 1];
+      if (!(terms[1] instanceof NumberTerm)) {
+        throw new IllegalArgumentException("Second parameter must be a Number");
+      }
+      final int size = (int) ((NumberTerm) terms[1]).solve();
 
+      // Get or create path state with null check
       PathState pathState = agentPaths.computeIfAbsent(
         agName,
         k -> new PathState()
       );
 
-      // Get current position and map
-      Point currentPos = model.getAgentMap(agName).getCurrentPosition();
-      PlannedMovement plannedMovement = model.getPlannedMovement();
+      // Get current position and map with null checks
+      final LocalMap agentMap = model.getAgentMap(agName);
+      if (agentMap == null) {
+        logger.warning(String.format("[%s] Agent map is null", agName));
+        return fallbackToRandomMovement(agName, un, outputTerm);
+      }
 
-      // If we failed recently, use random movement
+      final Point currentPos = agentMap.getCurrentPosition();
+      if (currentPos == null) {
+        logger.warning(String.format("[%s] Current position is null", agName));
+        return fallbackToRandomMovement(agName, un, outputTerm);
+      }
+
+      final PlannedMovement plannedMovement = model.getPlannedMovement();
+      if (plannedMovement == null) {
+        logger.warning(String.format("[%s] Planned movement is null", agName));
+        return fallbackToRandomMovement(agName, un, outputTerm);
+      }
+
+      // Check cooldown period
       if (!pathState.canRetryPathfinding()) {
         if (DEBUG) {
           long waitTime =
@@ -108,26 +133,47 @@ public class RequestGuidance extends DefaultInternalAction {
       try {
         CompletableFuture<Search.PathResult> pathFuture = CompletableFuture.supplyAsync(
           () -> {
-            // Find nearest target
-            Point target = plannedMovement.findNearestTarget(
-              model.getAgentMap(agName),
-              currentPos,
-              targetType
-            );
+            try {
+              // Convert target type safely
+              Search.TargetType targetType = convertTargetType(
+                targetTypeStr,
+                agName
+              );
+              targetTypeRef.set(targetType);
 
-            if (target == null) return null;
+              // Find nearest target
+              Point target = plannedMovement.findNearestTarget(
+                agentMap,
+                currentPos,
+                targetType
+              );
 
-            // Calculate path to target
-            return plannedMovement.calculatePath(
-              model.getAgentMap(agName),
-              currentPos,
-              target,
-              targetType
-            );
+              if (target == null) return null;
+
+              // Calculate path to target
+              return plannedMovement.calculatePath(
+                agentMap,
+                currentPos,
+                target,
+                targetType
+              );
+            } catch (Exception e) {
+              logger.warning(
+                String.format(
+                  "[%s] Error in path calculation: %s",
+                  agName,
+                  e.getMessage()
+                )
+              );
+              return null;
+            }
           }
         );
 
-        Search.PathResult pathResult = pathFuture.get();
+        Search.PathResult pathResult = pathFuture.get(
+          PATH_TIMEOUT,
+          TimeUnit.MILLISECONDS
+        );
 
         if (
           pathResult != null &&
@@ -148,17 +194,26 @@ public class RequestGuidance extends DefaultInternalAction {
           pathState.recordPath(new ArrayList<>(pathResult.directions));
           pathState.targetPosition =
             pathResult.points.get(pathResult.points.size() - 1);
-          pathState.targetType = targetType.toString();
+          pathState.targetType =
+            targetTypeRef.get() != null
+              ? targetTypeRef.get().toString()
+              : "UNKNOWN";
 
           String nextDirection = pathResult.directions.get(0);
           pathState.currentPath.remove(0);
           return returnSingleDirection(nextDirection, un, outputTerm);
         }
+      } catch (TimeoutException e) {
+        logger.warning(
+          String.format("[%s] Path calculation timed out", agName)
+        );
       } catch (Exception e) {
-        if (DEBUG) logger.log(
-          Level.WARNING,
-          String.format("[%s] Path calculation failed", agName),
-          e
+        logger.warning(
+          String.format(
+            "[%s] Error in path calculation: %s",
+            agName,
+            e.getMessage()
+          )
         );
       }
 
@@ -169,8 +224,15 @@ public class RequestGuidance extends DefaultInternalAction {
       );
       return fallbackToRandomMovement(agName, un, outputTerm);
     } catch (Exception e) {
-      logger.log(Level.SEVERE, "Error in RequestGuidance execution", e);
-      throw e;
+      logger.severe(
+        String.format(
+          "[%s] Unhandled error in RequestGuidance: %s",
+          agName,
+          e.getMessage()
+        )
+      );
+      // Always ensure we return a valid movement
+      return fallbackToRandomMovement(agName, un, outputTerm);
     }
   }
 
@@ -179,22 +241,34 @@ public class RequestGuidance extends DefaultInternalAction {
     Unifier un,
     Term outputTerm
   ) {
-    MI6Model model = MI6Model.getInstance();
-    RandomMovement randomMovement = model.getRandomMovement();
-    String randomDir = randomMovement.getNextDirection(agName);
-    if (randomDir == null) randomDir = "n";
+    try {
+      MI6Model model = MI6Model.getInstance();
+      RandomMovement randomMovement = model.getRandomMovement();
+      String randomDir = randomMovement.getNextDirection(agName);
+      if (randomDir == null) randomDir = "n"; // Default direction if all else fails
 
-    if (DEBUG) {
-      logger.info(
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "[%s] Using random movement: direction=%s",
+            agName,
+            randomDir
+          )
+        );
+      }
+
+      return returnSingleDirection(randomDir, un, outputTerm);
+    } catch (Exception e) {
+      logger.severe(
         String.format(
-          "[%s] Using random movement: direction=%s",
+          "[%s] Error in random movement fallback: %s",
           agName,
-          randomDir
+          e.getMessage()
         )
       );
+      // Ultimate fallback - return north
+      return returnSingleDirection("n", un, outputTerm);
     }
-
-    return returnSingleDirection(randomDir, un, outputTerm);
   }
 
   private Object returnSingleDirection(
@@ -202,12 +276,16 @@ public class RequestGuidance extends DefaultInternalAction {
     Unifier un,
     Term outputTerm
   ) {
-    if (DEBUG) {
-      logger.info(String.format("Returning single direction: %s", direction));
+    try {
+      if (DEBUG) {
+        logger.info(String.format("Returning single direction: %s", direction));
+      }
+      return un.unifies(new Atom(direction), outputTerm);
+    } catch (Exception e) {
+      logger.severe("Error in direction unification: " + e.getMessage());
+      // If unification fails, return false
+      return false;
     }
-
-    // Return the direction as a single atom instead of a list
-    return un.unifies(new Atom(direction), outputTerm);
   }
 
   // Helper method to convert string to enum
