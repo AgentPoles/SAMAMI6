@@ -218,30 +218,17 @@ public class RandomMovement {
     if (map == null) return null;
 
     Point currentPos = map.getCurrentPosition();
+    DirectionMemory memory = directionMemory.computeIfAbsent(
+      agName,
+      k -> new DirectionMemory()
+    );
+    EntropyMap entropyMap = entropyMaps.computeIfAbsent(
+      agName,
+      k -> new EntropyMap()
+    );
 
-    // Get all available directions first
-    List<String> availableDirections = new ArrayList<>();
-
-    // Check each direction for obstacles and boundaries
-    Point northPos = new Point(currentPos.x, currentPos.y - 1);
-    Point southPos = new Point(currentPos.x, currentPos.y + 1);
-    Point eastPos = new Point(currentPos.x + 1, currentPos.y);
-    Point westPos = new Point(currentPos.x - 1, currentPos.y);
-
-    if (
-      !map.hasObstacle(northPos) && !map.isOutOfBounds(northPos)
-    ) availableDirections.add("n");
-    if (
-      !map.hasObstacle(southPos) && !map.isOutOfBounds(southPos)
-    ) availableDirections.add("s");
-    if (
-      !map.hasObstacle(eastPos) && !map.isOutOfBounds(eastPos)
-    ) availableDirections.add("e");
-    if (
-      !map.hasObstacle(westPos) && !map.isOutOfBounds(westPos)
-    ) availableDirections.add("w");
-
-    // If no directions available, return null
+    // Get available directions
+    List<String> availableDirections = getAvailableDirections(map, currentPos);
     if (availableDirections.isEmpty()) {
       System.out.println(
         "[RandomMovement] " +
@@ -252,35 +239,73 @@ public class RandomMovement {
       return null;
     }
 
-    // Get memory for this agent
-    DirectionMemory memory = directionMemory.computeIfAbsent(
-      agName,
-      k -> new DirectionMemory()
-    );
-
-    // If we're stuck, avoid the last direction
+    // If we're stuck, try to break out
     if (memory.isStuck()) {
-      String lastDir = memory.getLastDirection();
-      availableDirections.remove(lastDir);
-      if (availableDirections.isEmpty()) {
-        availableDirections.add(lastDir); // If no other choice, keep the last direction
+      String breakoutDir = getBreakoutDirection(
+        new ArrayList<>(availableDirections),
+        memory.getLastDirection()
+      );
+      System.out.println(
+        "[RandomMovement] " +
+        agName +
+        ": Stuck! Breaking out with direction: " +
+        breakoutDir
+      );
+      if (breakoutDir != null) {
+        memory.addMove(
+          breakoutDir,
+          calculateNextPosition(currentPos, breakoutDir)
+        );
+        return breakoutDir;
       }
     }
 
-    // Choose a random available direction
-    String chosenDirection = availableDirections.get(
-      random.nextInt(availableDirections.size())
-    );
+    // Calculate scores for each direction
+    Map<String, Double> scores = new HashMap<>();
+    for (String direction : availableDirections) {
+      Point targetPos = calculateNextPosition(currentPos, direction);
 
-    // Update memory
-    Point newPos = calculateTargetPosition(currentPos, chosenDirection);
+      // Component scores
+      double safetyScore =
+        getObstacleAvoidanceScore(agName, map, currentPos, targetPos) * 0.3;
+      double entropyScore = (1.0 - entropyMap.getHeat(targetPos)) * 0.2;
+      double momentumScore = getMomentumScore(direction, memory) * 0.2;
+      double explorationScore =
+        calculateExplorationScore(targetPos, agName, map) * 0.3;
+
+      // Combine scores with randomization factor
+      double randomFactor = random.nextDouble() * 0.2; // Add some randomness
+      scores.put(
+        direction,
+        safetyScore +
+        entropyScore +
+        momentumScore +
+        explorationScore +
+        randomFactor
+      );
+    }
+
+    // Select direction with highest score
+    String chosenDirection = scores
+      .entrySet()
+      .stream()
+      .max(Map.Entry.comparingByValue())
+      .map(Map.Entry::getKey)
+      .orElse(
+        availableDirections.get(random.nextInt(availableDirections.size()))
+      );
+
+    // Update memory and entropy
+    Point newPos = calculateNextPosition(currentPos, chosenDirection);
     memory.addMove(chosenDirection, newPos);
+    entropyMap.updateHeat(newPos);
+    entropyMap.decayHeat();
 
     System.out.println(
       "[RandomMovement] " +
       agName +
-      ": Available directions: " +
-      availableDirections +
+      ": Scores - " +
+      scores +
       ", chose: " +
       chosenDirection +
       " at position " +
@@ -288,6 +313,28 @@ public class RandomMovement {
     );
 
     return chosenDirection;
+  }
+
+  private List<String> getAvailableDirections(LocalMap map, Point currentPos) {
+    List<String> directions = new ArrayList<>();
+    Point[] adjacentPoints = {
+      new Point(currentPos.x, currentPos.y - 1), // N
+      new Point(currentPos.x, currentPos.y + 1), // S
+      new Point(currentPos.x + 1, currentPos.y), // E
+      new Point(currentPos.x - 1, currentPos.y), // W
+    };
+    String[] dirs = { "n", "s", "e", "w" };
+
+    for (int i = 0; i < adjacentPoints.length; i++) {
+      if (
+        !map.hasObstacle(adjacentPoints[i]) &&
+        !map.isOutOfBounds(adjacentPoints[i])
+      ) {
+        directions.add(dirs[i]);
+      }
+    }
+
+    return directions;
   }
 
   private Point calculateTargetPosition(Point current, String direction) {
@@ -393,7 +440,18 @@ public class RandomMovement {
   private double getMomentumScore(String direction, DirectionMemory memory) {
     String lastDir = memory.getLastDirection();
     if (lastDir == null) return 0.5;
-    return direction.equals(lastDir) ? 1.0 : 0.0;
+
+    // Encourage some direction changes to prevent straight-line movement
+    if (direction.equals(lastDir) && memory.lastMoves.size() >= 3) {
+      boolean allSameDirection = memory
+        .lastMoves.stream()
+        .allMatch(d -> d.equals(lastDir));
+      if (allSameDirection) {
+        return 0.1; // Discourage continuing in the same direction for too long
+      }
+    }
+
+    return direction.equals(lastDir) ? 0.8 : 0.4;
   }
 
   private String selectBestDirection(
@@ -442,11 +500,18 @@ public class RandomMovement {
     List<String> availableDirections,
     String lastDirection
   ) {
-    // When stuck, explicitly avoid the last direction
-    availableDirections.remove(lastDirection);
-    if (availableDirections.isEmpty()) {
-      return lastDirection; // If no other choice, use last direction
+    if (lastDirection != null) {
+      // Remove the last direction and its opposite
+      availableDirections.remove(lastDirection);
+      availableDirections.remove(getOppositeDirection(lastDirection));
     }
+
+    if (availableDirections.isEmpty()) {
+      // If no other directions available, use any available direction
+      return lastDirection;
+    }
+
+    // Choose a random direction from remaining options
     return availableDirections.get(random.nextInt(availableDirections.size()));
   }
 
@@ -778,54 +843,26 @@ public class RandomMovement {
     String agName,
     LocalMap map
   ) {
-    Point nextZone = getCurrentZone(nextPos);
+    Point currentZone = getCurrentZone(nextPos);
     AgentZoneMemory memory = agentZoneMemories.computeIfAbsent(
       agName,
       k -> new AgentZoneMemory()
     );
 
-    // Record starting zone if not already recorded
-    Point startingZone = startingZones.computeIfAbsent(
-      agName,
-      k -> getCurrentZone(map.getCurrentPosition())
-    );
-
-    // Strong penalty for staying near starting zone
-    double startingZoneDistance = euclideanDistance(nextZone, startingZone);
-    if (startingZoneDistance < STARTING_ZONE_REPULSION) {
-      return -1.0 + (startingZoneDistance / STARTING_ZONE_REPULSION);
+    // Stronger penalty for revisiting recent zones
+    if (memory.visitedZones.contains(currentZone)) {
+      int recency = new ArrayList<>(memory.visitedZones).indexOf(currentZone);
+      return 0.3 / (recency + 1);
     }
 
-    // Heavily penalize overvisited zones
-    if (memory.isZoneOvervisited(nextZone)) {
-      return -0.8;
+    // Bonus for unexplored zones
+    if (!memory.zoneVisits.containsKey(currentZone)) {
+      return 1.0;
     }
 
-    // Higher bonus for unexplored zones
-    if (!memory.zoneVisits.containsKey(nextZone)) {
-      return UNEXPLORED_BONUS;
-    }
-
-    // Stronger penalties for recently visited zones
-    double recencyPenalty = 0;
-    int index = 0;
-    for (Point zone : memory.visitedZones) {
-      if (zone.equals(nextZone)) {
-        recencyPenalty = 0.2 * (ZONE_MEMORY - index) / ZONE_MEMORY;
-        break;
-      }
-      index++;
-    }
-
-    // Add diagonal movement bonus to encourage wider exploration
-    String directionToZone = getDirectionBetweenZones(
-      memory.currentZone,
-      nextZone
-    );
-    boolean isDiagonal = isDiagonalMove(directionToZone);
-    double diagonalBonus = isDiagonal ? 0.2 : 0;
-
-    return 0.3 - recencyPenalty + diagonalBonus;
+    // Penalty based on number of visits
+    int visits = memory.zoneVisits.getOrDefault(currentZone, 0);
+    return Math.max(0.2, 1.0 - (visits * 0.2));
   }
 
   private boolean isDiagonalMove(String direction) {
