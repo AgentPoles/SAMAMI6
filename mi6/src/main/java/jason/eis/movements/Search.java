@@ -63,11 +63,16 @@ public class Search {
     LocalMap map,
     TargetType targetType
   ) {
+    // Priority queue ordered by f-cost (g + h)
     PriorityQueue<JumpPoint> openSet = new PriorityQueue<>(
       Comparator.comparingDouble(JumpPoint::fCost)
     );
+
+    // Track visited nodes and their best g-costs
+    Map<Point, Double> gScores = new HashMap<>();
     Set<Point> closedSet = new HashSet<>();
 
+    // Initialize start point
     JumpPoint startPoint = new JumpPoint(
       start,
       null,
@@ -76,111 +81,58 @@ public class Search {
       null
     );
     openSet.add(startPoint);
+    gScores.put(start, 0.0);
 
     while (!openSet.isEmpty()) {
       JumpPoint current = openSet.poll();
 
+      // Found target
       if (isAtTarget(current.position, target, targetType)) {
         return reconstructPath(current);
       }
 
       closedSet.add(current.position);
 
-      // Identify successors using jumping rules
+      // Check each possible direction
       for (String direction : DIRECTIONS) {
-        Point jumpPoint = jump(current.position, direction, map, target);
-        if (jumpPoint == null || closedSet.contains(jumpPoint)) continue;
+        Point nextPos = applyDirection(current.position, direction);
 
-        double newG =
-          current.gCost + euclideanDistance(current.position, jumpPoint);
-        JumpPoint successor = new JumpPoint(
-          jumpPoint,
-          current,
-          newG,
-          heuristic(jumpPoint, target),
-          direction
-        );
+        // Skip if not walkable or already evaluated
+        if (!isWalkable(nextPos, map) || closedSet.contains(nextPos)) {
+          continue;
+        }
 
-        if (!openSet.contains(successor)) {
-          openSet.add(successor);
+        // Calculate new path cost to this neighbor
+        double newG = current.gCost + 1.0; // Cost of 1 for each step
+
+        // If we found a better path to this point
+        if (!gScores.containsKey(nextPos) || newG < gScores.get(nextPos)) {
+          gScores.put(nextPos, newG);
+          double h = heuristic(nextPos, target);
+          JumpPoint neighbor = new JumpPoint(
+            nextPos,
+            current,
+            newG,
+            h,
+            direction
+          );
+          openSet.add(neighbor);
         }
       }
     }
 
+    // No path found
     return new PathResult(new ArrayList<>(), new ArrayList<>(), false);
   }
 
-  private Point jump(
-    Point current,
-    String direction,
-    LocalMap map,
-    Point target
-  ) {
-    Point next = applyDirection(current, direction);
-
-    if (!isWalkable(next, map)) return null;
-    if (isAtTarget(next, target, null)) return next; // Found target
-
-    // Check for forced neighbors
-    if (hasForceNeighbor(next, direction, map)) {
-      return next;
-    }
-
-    // Diagonal movement (will implement later for size > 1)
-
-    // Continue jumping
-    return jump(next, direction, map, target);
-  }
-
-  private boolean hasForceNeighbor(Point pos, String direction, LocalMap map) {
-    // Check for obstacles that create forced neighbors
-    Point[] neighbors = getNeighbors(pos, direction);
-    for (Point neighbor : neighbors) {
-      if (!isWalkable(neighbor, map)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private Point[] getNeighbors(Point pos, String direction) {
-    // Return relevant neighboring points based on direction
-    switch (direction) {
-      case "n":
-      case "s":
-        return new Point[] {
-          new Point(pos.x - 1, pos.y),
-          new Point(pos.x + 1, pos.y),
-        };
-      case "e":
-      case "w":
-        return new Point[] {
-          new Point(pos.x, pos.y - 1),
-          new Point(pos.x, pos.y + 1),
-        };
-      default:
-        return new Point[0];
-    }
-  }
-
   private boolean isWalkable(Point pos, LocalMap map) {
+    // Check for obstacles and map boundaries
     return !map.hasObstacle(pos) && !map.isOutOfBounds(pos);
   }
 
-  private boolean isAtTarget(Point pos, Point target, TargetType type) {
-    // For size 1, simple position check
-    return pos.equals(target);
-  }
-
   private double heuristic(Point a, Point b) {
-    // Manhattan distance for grid movement
+    // Manhattan distance is admissible for 4-directional grid movement
     return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
-  }
-
-  private double euclideanDistance(Point a, Point b) {
-    double dx = a.x - b.x;
-    double dy = a.y - b.y;
-    return Math.sqrt(dx * dx + dy * dy);
   }
 
   private Point applyDirection(Point pos, String direction) {
@@ -201,5 +153,10 @@ public class Search {
     points.add(0, current.position); // Add start position
 
     return new PathResult(directions, points, true);
+  }
+
+  private boolean isAtTarget(Point pos, Point target, TargetType type) {
+    // For size 1, simple position check
+    return pos.equals(target);
   }
 }

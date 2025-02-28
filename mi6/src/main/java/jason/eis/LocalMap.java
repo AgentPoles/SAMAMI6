@@ -1236,68 +1236,34 @@ public class LocalMap {
     return false;
   }
 
-  public Point findNearestTarget(
-    Point currentPos,
-    Search.TargetType targetType,
-    int maxRange
-  ) {
-    Point nearest = null;
-    double minDistance = Double.MAX_VALUE;
-
-    // Get relevant entities from spatial grid based on type
-    Collection<Entity> entities = new ArrayList<>(); // Initialize empty list
-
-    // Collect entities based on type
-    switch (targetType) {
-      case DISPENSER:
-        entities = dispensers.values();
-        break;
-      case BLOCK:
-        entities = blocks.values();
-        break;
-      case GOAL:
-        entities = goals.values();
-        break;
-    }
-
-    for (Entity entity : entities) {
-      Point entityPos = entity.getPosition();
-      if (entityPos != null) {
-        double distance = euclideanDistance(currentPos, entityPos);
-        if (distance < minDistance && distance <= maxRange) {
-          minDistance = distance;
-          nearest = entityPos;
-        }
-      }
-    }
-
-    return nearest;
+  public List<Point> getDispensers() {
+    return typeIndex
+      .get(EntityType.DISPENSER)
+      .values()
+      .stream()
+      .filter(e -> !e.isStale())
+      .map(e -> e.position)
+      .collect(Collectors.toList());
   }
 
-  public Point findBestTarget(Point currentPos, Search.TargetType targetType) {
-    // For now, just use findNearestTarget without range limit
-    return findNearestTarget(currentPos, targetType, Integer.MAX_VALUE);
+  public List<Point> getBlocks() {
+    return typeIndex
+      .get(EntityType.BLOCK)
+      .values()
+      .stream()
+      .filter(e -> !e.isStale())
+      .map(e -> e.position)
+      .collect(Collectors.toList());
   }
 
-  private boolean matchesTargetType(
-    Entity entity,
-    Search.TargetType targetType
-  ) {
-    if (entity == null) return false;
-
-    String entityType = entity.details;
-    if (entityType == null) return false;
-
-    switch (targetType) {
-      case DISPENSER:
-        return "dispenser".equals(entityType);
-      case BLOCK:
-        return "block".equals(entityType);
-      case GOAL:
-        return "goal".equals(entityType);
-      default:
-        return false;
-    }
+  public List<Point> getGoals() {
+    return typeIndex
+      .get(EntityType.GOAL)
+      .values()
+      .stream()
+      .filter(e -> !e.isStale())
+      .map(e -> e.position)
+      .collect(Collectors.toList());
   }
 
   public void removeEntity(Point pos) {

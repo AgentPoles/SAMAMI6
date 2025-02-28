@@ -859,10 +859,10 @@ public class MI6Model {
     if (map == null) return null;
 
     Point currentPos = map.getCurrentPosition();
-    return map.findNearestTarget(
+    return plannedMovement.findNearestTarget(
+      map,
       currentPos,
-      Search.TargetType.DISPENSER,
-      Integer.MAX_VALUE
+      Search.TargetType.DISPENSER
     );
   }
 
@@ -999,10 +999,10 @@ public class MI6Model {
 
     Search.TargetType searchType = convertTargetType(targetType);
     Point currentPos = map.getCurrentPosition();
-    Point target = map.findNearestTarget(
+    Point target = plannedMovement.findNearestTarget(
+      map,
       currentPos,
-      searchType,
-      Integer.MAX_VALUE
+      searchType
     );
 
     if (target == null) {
@@ -1027,5 +1027,9 @@ public class MI6Model {
       default:
         return Search.TargetType.DISPENSER;
     }
+  }
+
+  public PlannedMovement getPlannedMovement() {
+    return plannedMovement;
   }
 }
