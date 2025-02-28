@@ -1,5 +1,8 @@
 package jason.eis;
 
+import jason.asSyntax.Atom;
+import jason.asSyntax.NumberTerm;
+import jason.asSyntax.Term;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
@@ -33,10 +36,10 @@ public class LocalMap {
   // Add debug tracking map
   private final Map<String, EntityDebugInfo> debugTrackingMap;
 
-  private final Map<Point, DynamicObstacle> dynamicObstacles = new ConcurrentHashMap<>();
+  private final Map<Point, ObstacleInfo> dynamicObstacles = new ConcurrentHashMap<>();
   private static final int DYNAMIC_OBSTACLE_TTL = 3000; // 3 seconds time-to-live
-  private static final int CRITICAL_DISTANCE = 2; // Distance where obstacles become critical to avoid
-  private static final int AWARENESS_DISTANCE = 4; // Max distance to track obstacles
+  public static final int CRITICAL_DISTANCE = 2; // Distance where obstacles become critical to avoid
+  public static final int AWARENESS_DISTANCE = 5; // Max distance to track obstacles
 
   private Point mapMinBounds = null;
   private Point mapMaxBounds = null;
@@ -51,7 +54,6 @@ public class LocalMap {
 
   private final Map<String, BoundaryInfo> confirmedBoundaries = new HashMap<>();
   private final Map<Point, ObstacleInfo> staticObstacles = new HashMap<>();
-  private final Map<Point, ObstacleInfo> dynamicObstacles = new HashMap<>();
 
   public enum EntityType {
     DISPENSER,
@@ -173,39 +175,6 @@ public class LocalMap {
     }
   }
 
-  private static class DynamicObstacle {
-    Point position;
-    Point velocity;
-    long lastSeen;
-    String type; // "agent", "block", etc.
-
-    DynamicObstacle(Point pos, String type) {
-      this.position = pos;
-      this.type = type;
-      this.lastSeen = System.currentTimeMillis();
-    }
-
-    void updatePosition(Point newPos) {
-      if (position != null) {
-        velocity = new Point(newPos.x - position.x, newPos.y - position.y);
-      }
-      position = newPos;
-      lastSeen = System.currentTimeMillis();
-    }
-
-    boolean isStale() {
-      return System.currentTimeMillis() - lastSeen > DYNAMIC_OBSTACLE_TTL;
-    }
-
-    Point predictPosition(int steps) {
-      if (velocity == null) return position;
-      return new Point(
-        position.x + (velocity.x * steps),
-        position.y + (velocity.y * steps)
-      );
-    }
-  }
-
   private static class BoundaryEvidence {
     int failedMoves = 0;
     int continuousObstacles = 0;
@@ -241,15 +210,56 @@ public class LocalMap {
     }
   }
 
-  private static class ObstacleInfo {
-    long lastSeen;
+  public static class ObstacleInfo {
+    private final Point position;
+    private Point velocity; // Add velocity tracking
+    private long lastSeen;
+    private final String type;
+    private final boolean isDynamic;
+    private Point lastPosition; // Add last position tracking
 
-    ObstacleInfo() {
+    public ObstacleInfo(Point pos, String type, boolean isDynamic) {
+      this.position = pos;
+      this.type = type;
+      this.isDynamic = isDynamic;
+      this.lastSeen = System.currentTimeMillis();
+      this.velocity = null;
+      this.lastPosition = null;
+    }
+
+    public void updateSeen() {
+      if (lastPosition != null && !position.equals(lastPosition)) {
+        // Calculate velocity based on position change
+        velocity =
+          new Point(position.x - lastPosition.x, position.y - lastPosition.y);
+      }
+      lastPosition = position;
       this.lastSeen = System.currentTimeMillis();
     }
 
-    void updateSeen() {
-      this.lastSeen = System.currentTimeMillis();
+    public Point predictPosition(int steps) {
+      if (!isDynamic || velocity == null) return position;
+
+      return new Point(
+        position.x + (velocity.x * steps),
+        position.y + (velocity.y * steps)
+      );
+    }
+
+    public boolean isStale() {
+      return isDynamic && System.currentTimeMillis() - lastSeen > 5000; // 5 seconds
+    }
+
+    public Point getPosition() {
+      return position;
+    }
+
+    public String getType() {
+      return type;
+    }
+
+    public boolean isDynamic() {
+      return isDynamic;
     }
   }
 
@@ -438,7 +448,7 @@ public class LocalMap {
         currentAbsPos.y + relativePos.y
       );
 
-      // Only add if not already present
+      // Add to the grid (keep existing functionality)
       if (!obstacles.contains(absolutePos)) {
         obstacles.add(absolutePos);
         if (DEBUG) {
@@ -453,6 +463,12 @@ public class LocalMap {
           );
         }
       }
+
+      // Also add to static obstacles info
+      staticObstacles.putIfAbsent(
+        absolutePos,
+        new ObstacleInfo(absolutePos, "static", false)
+      );
     }
   }
 
@@ -530,13 +546,11 @@ public class LocalMap {
     String type,
     Point currentPos
   ) {
-    // Convert to absolute position
     Point absPos = new Point(
       currentPos.x + relativePos.x,
       currentPos.y + relativePos.y
     );
 
-    // Only track obstacles within awareness distance
     if (
       Math.abs(relativePos.x) > AWARENESS_DISTANCE ||
       Math.abs(relativePos.y) > AWARENESS_DISTANCE
@@ -544,15 +558,14 @@ public class LocalMap {
       return;
     }
 
-    // Update or add dynamic obstacle
     dynamicObstacles.compute(
       absPos,
       (k, existing) -> {
-        if (existing == null) {
-          return new DynamicObstacle(absPos, type);
-        } else {
-          existing.updatePosition(absPos);
+        if (existing != null) {
+          existing.updateSeen();
           return existing;
+        } else {
+          return new ObstacleInfo(absPos, type, true);
         }
       }
     );
@@ -566,7 +579,7 @@ public class LocalMap {
     clearStaleDynamicObstacles();
 
     // Check current and predicted positions
-    for (DynamicObstacle obstacle : dynamicObstacles.values()) {
+    for (ObstacleInfo obstacle : dynamicObstacles.values()) {
       // Check current position
       if (isPointInPath(obstacle.position, from, to)) {
         return true;
@@ -574,7 +587,7 @@ public class LocalMap {
 
       // Check predicted positions (next 2 steps)
       for (int step = 1; step <= 2; step++) {
-        Point predicted = obstacle.predictPosition(step);
+        Point predicted = obstacle.position;
         if (isPointInPath(predicted, from, to)) {
           return true;
         }
@@ -631,8 +644,12 @@ public class LocalMap {
     );
   }
 
-  public Map<Point, DynamicObstacle> getDynamicObstacles() {
-    clearStaleDynamicObstacles();
+  public Map<Point, ObstacleInfo> getDynamicObstacles() {
+    // Clean up stale obstacles first
+    long now = System.currentTimeMillis();
+    dynamicObstacles
+      .entrySet()
+      .removeIf(entry -> now - entry.getValue().lastSeen > 5000);
     return new HashMap<>(dynamicObstacles);
   }
 
@@ -836,24 +853,6 @@ public class LocalMap {
     return boundsInitialized;
   }
 
-  public void detectBoundariesFromPercepts(
-    List<Percept> percepts,
-    Point currentPos
-  ) {
-    // Look for boundary percepts in the agent's vision
-    for (Percept percept : percepts) {
-      if (percept.getName().equals("obstacle")) {
-        // Get relative coordinates from percept
-        int relX = ((NumberTerm) percept.getParameters().get(0)).solve();
-        int relY = ((NumberTerm) percept.getParameters().get(1)).solve();
-
-        // Check if this might be a boundary
-        // Boundaries often appear as continuous lines of obstacles
-        checkForBoundaryPattern(relX, relY, currentPos);
-      }
-    }
-  }
-
   private void checkForBoundaryPattern(int relX, int relY, Point currentPos) {
     // Look for continuous lines of obstacles that might indicate boundaries
     if (Math.abs(relX) == LocalMap.AWARENESS_DISTANCE) {
@@ -902,27 +901,37 @@ public class LocalMap {
   }
 
   public void checkVisionLimitObstacles(
-    Collection<Percept> percepts,
+    Collection<Term> percepts,
     Point currentPos
   ) {
     // Reset continuous obstacle counts
     Map<String, Integer> continuousObstacles = new HashMap<>();
 
     // Check for continuous obstacles at vision limits
-    for (Percept percept : percepts) {
-      if (!"obstacle".equals(percept.getName())) continue;
+    for (Term percept : percepts) {
+      if (!(percept instanceof Atom)) continue;
 
-      // Get relative coordinates
-      int relX = ((NumberTerm) percept.getParameters().get(0)).solve();
-      int relY = ((NumberTerm) percept.getParameters().get(1)).solve();
+      Atom atom = (Atom) percept;
+      if (!"obstacle".equals(atom.getFunctor())) continue;
 
-      // Check if obstacle is at vision limit
-      if (
-        Math.abs(relX) == AWARENESS_DISTANCE ||
-        Math.abs(relY) == AWARENESS_DISTANCE
-      ) {
-        String direction = getDirectionFromRelative(relX, relY);
-        continuousObstacles.merge(direction, 1, Integer::sum);
+      try {
+        // Get relative coordinates
+        List<Term> terms = atom.getTerms();
+        if (terms == null || terms.size() < 2) continue;
+
+        int relX = (int) ((NumberTerm) terms.get(0)).solve();
+        int relY = (int) ((NumberTerm) terms.get(1)).solve();
+
+        // Check if obstacle is at vision limit
+        if (
+          Math.abs(relX) == AWARENESS_DISTANCE ||
+          Math.abs(relY) == AWARENESS_DISTANCE
+        ) {
+          String direction = getDirectionFromRelative(relX, relY);
+          continuousObstacles.merge(direction, 1, Integer::sum);
+        }
+      } catch (Exception e) {
+        // Skip invalid percepts
       }
     }
 
@@ -951,22 +960,24 @@ public class LocalMap {
 
   public void recordBoundary(String direction, Point currentPos) {
     // For failed_forbidden failures, we can immediately confirm the boundary
-    Point boundaryPos = new Point(currentPos.x, currentPos.y);
+    Point boundaryPos;
 
-    // The boundary is at the position we tried to move to
+    // Create new Point object with adjusted coordinates
     switch (direction) {
       case "n":
-        boundaryPos.y--;
+        boundaryPos = new Point(currentPos.x, currentPos.y - 1);
         break;
       case "s":
-        boundaryPos.y++;
+        boundaryPos = new Point(currentPos.x, currentPos.y + 1);
         break;
       case "e":
-        boundaryPos.x++;
+        boundaryPos = new Point(currentPos.x + 1, currentPos.y);
         break;
       case "w":
-        boundaryPos.x--;
+        boundaryPos = new Point(currentPos.x - 1, currentPos.y);
         break;
+      default:
+        return;
     }
 
     confirmedBoundaries.put(direction, new BoundaryInfo(boundaryPos));
@@ -979,8 +990,11 @@ public class LocalMap {
   }
 
   public void recordObstacle(Point position) {
-    // For failed_path failures
-    staticObstacles.put(position, new ObstacleInfo());
+    recordObstacle(position, "static", false);
+  }
+
+  public void recordObstacle(Point position, String type, boolean isDynamic) {
+    staticObstacles.put(position, new ObstacleInfo(position, type, isDynamic));
   }
 
   public Point getBoundaryPosition(String direction) {
@@ -996,43 +1010,49 @@ public class LocalMap {
     return boundaries;
   }
 
-  public void updateFromPercepts(
-    Collection<Percept> percepts,
-    Point currentPos
-  ) {
-    // Track currently visible dynamic obstacles
+  public void updateFromPercepts(Collection<Term> percepts, Point currentPos) {
     Set<Point> currentlyVisible = new HashSet<>();
 
-    for (Percept percept : percepts) {
-      if ("thing".equals(percept.getName())) { // Dynamic obstacles are "things"
-        // Get relative coordinates and type from percept
-        int relX = ((NumberTerm) percept.getParameters().get(0)).solve();
-        int relY = ((NumberTerm) percept.getParameters().get(1)).solve();
-        String type = ((Identifier) percept.getParameters().get(2)).toString();
+    for (Term percept : percepts) {
+      if (!(percept instanceof Atom)) continue;
 
-        // Only track other agents as dynamic obstacles
-        if ("entity".equals(type)) {
-          Point obstaclePos = new Point(
-            currentPos.x + relX,
-            currentPos.y + relY
-          );
-          currentlyVisible.add(obstaclePos);
+      try {
+        String name = ((Atom) percept).getFunctor();
+        List<Term> terms = ((Atom) percept).getTerms();
 
-          // Update or add dynamic obstacle
-          dynamicObstacles
-            .computeIfAbsent(obstaclePos, k -> new ObstacleInfo())
-            .updateSeen();
+        if (terms == null || terms.size() < 2) continue;
+
+        double x = ((NumberTerm) terms.get(0)).solve();
+        double y = ((NumberTerm) terms.get(1)).solve();
+        Point absPos = new Point(
+          currentPos.x + (int) x,
+          currentPos.y + (int) y
+        );
+
+        if ("thing".equals(name) && terms.size() > 2) {
+          String type = terms.get(2).toString();
+          if ("entity".equals(type)) {
+            currentlyVisible.add(absPos);
+            dynamicObstacles
+              .computeIfAbsent(
+                absPos,
+                k -> new ObstacleInfo(absPos, type, true)
+              )
+              .updateSeen();
+          }
         }
+      } catch (Exception e) {
+        // Skip invalid percepts
       }
     }
 
-    // Clean up only dynamic obstacles that haven't been seen recently
+    // Clean up stale obstacles
     long now = System.currentTimeMillis();
     dynamicObstacles
       .entrySet()
       .removeIf(
         entry ->
-          now - entry.getValue().lastSeen > 5000 && // 5 seconds TTL
+          now - entry.getValue().lastSeen > 5000 &&
           !currentlyVisible.contains(entry.getKey())
       );
   }
@@ -1090,12 +1110,12 @@ public class LocalMap {
   }
 
   public void recordStaticObstacle(Point position) {
-    staticObstacles.put(position, new ObstacleInfo());
+    staticObstacles.put(position, new ObstacleInfo(position, "static", false));
   }
 
   public void addOtherAgent(int relX, int relY, Point currentPos) {
     Point agentPos = new Point(currentPos.x + relX, currentPos.y + relY);
-    dynamicObstacles.put(agentPos, new ObstacleInfo());
+    dynamicObstacles.put(agentPos, new ObstacleInfo(agentPos, "dynamic", true));
 
     if (DEBUG) {
       System.out.println("Added dynamic obstacle (agent) at " + agentPos);
@@ -1107,13 +1127,49 @@ public class LocalMap {
     dynamicObstacles.clear();
   }
 
-  // Get all dynamic obstacles for path planning
-  public Set<Point> getDynamicObstacles() {
-    return new HashSet<>(dynamicObstacles.keySet());
-  }
-
   // Get all static obstacles for path planning
   public Set<Point> getStaticObstacles() {
     return new HashSet<>(staticObstacles.keySet());
+  }
+
+  public boolean hasObstacle(Point pos) {
+    return (
+      staticObstacles.containsKey(pos) || dynamicObstacles.containsKey(pos)
+    );
+  }
+
+  // Add this helper method if you need just the positions:
+  public Set<Point> getDynamicObstaclePositions() {
+    return new HashSet<>(getDynamicObstacles().keySet());
+  }
+
+  // Add this method to check for obstacles along a path
+  private boolean hasObstacleInPath(Point from, Point to) {
+    // Simple line-of-sight check using Bresenham's algorithm
+    int dx = Math.abs(to.x - from.x);
+    int dy = Math.abs(to.y - from.y);
+    int x = from.x;
+    int y = from.y;
+    int n = 1 + dx + dy;
+    int x_inc = (to.x > from.x) ? 1 : -1;
+    int y_inc = (to.y > from.y) ? 1 : -1;
+    int error = dx - dy;
+    dx *= 2;
+    dy *= 2;
+
+    for (; n > 0; --n) {
+      Point check = new Point(x, y);
+      if (hasObstacle(check)) {
+        return true;
+      }
+      if (error > 0) {
+        x += x_inc;
+        error -= dy;
+      } else {
+        y += y_inc;
+        error += dx;
+      }
+    }
+    return false;
   }
 }

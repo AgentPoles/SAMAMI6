@@ -6,7 +6,6 @@ import jason.asSemantics.Unifier;
 import jason.asSyntax.*;
 import jason.eis.MI6Model;
 import jason.eis.Point;
-import jason.eis.movements.RandomMovement;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -27,40 +26,26 @@ public class RequestGuidance extends DefaultInternalAction {
       Atom targetType = (Atom) terms[0];
       int size = (int) ((NumberTerm) terms[1]).solve();
 
-      // Optional attachment direction for size > 1
-      String attachmentDirection = null;
-      if (terms.length > 3 && size > 1) {
-        attachmentDirection = ((Atom) terms[2]).getFunctor();
-      }
+      // Get random direction
+      String direction = getRandomDirection(agName, model);
 
-      // Get random direction considering size constraints
-      String direction = getRandomDirection(
-        agName,
-        model,
-        size,
-        attachmentDirection
-      );
+      // Create a list with single direction for now
+      ListTerm dirList = new ListTermImpl();
+      dirList.add(new Atom(direction));
 
-      // Unify the result with the output variable
-      if (direction != null) {
-        return un.unifies(new Atom(direction), terms[terms.length - 1]);
-      }
-
-      return false;
+      // Unify with the output variable
+      return un.unifies(dirList, terms[2]);
     } catch (Exception e) {
       e.printStackTrace();
       return false;
     }
   }
 
-  private String getRandomDirection(
-    String agName,
-    MI6Model model,
-    int size,
-    String attachmentDirection
-  ) {
-    RandomMovement randomMovement = model.getRandomMovement();
-    return randomMovement.getNextDirection(agName);
+  private String getRandomDirection(String agName, MI6Model model) {
+    // For now, just return a random direction
+    String[] directions = { "n", "s", "e", "w" };
+    int randomIndex = (int) (Math.random() * directions.length);
+    return directions[randomIndex];
   }
 
   // Placeholder for future planned movement implementation

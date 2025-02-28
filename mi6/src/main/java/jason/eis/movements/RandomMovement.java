@@ -1,21 +1,26 @@
 package jason.eis.movements;
 
 import jason.eis.LocalMap;
+import jason.eis.LocalMap.ObstacleInfo;
 import jason.eis.Point;
+import jason.eis.movements.ObstacleMemory;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 public class RandomMovement {
   private final Map<String, LocalMap> agentMaps;
-  private final Map<String, DirectionMemory> directionMemory;
-  private final Map<String, EntropyMap> entropyMaps;
+  private final Map<String, DirectionMemory> directionMemory = new ConcurrentHashMap<>();
+  private final Map<String, EntropyMap> entropyMaps = new ConcurrentHashMap<>();
   private final Random random = new Random();
 
-  // Optimized constants
+  // Constants
   private static final int MEMORY_SIZE = 5;
-  private static final int HEAT_MAP_SIZE = 100; // Limit heat map size for memory efficiency
   private static final double ENTROPY_DECAY = 0.95;
+  private static final double BASE_WEIGHT = 0.5;
+
+  // Optimized constants
+  private static final int HEAT_MAP_SIZE = 100; // Limit heat map size for memory efficiency
 
   // Dynamic weights
   private static final double BASE_ENTROPY_WEIGHT = 0.4;
@@ -44,27 +49,23 @@ public class RandomMovement {
   private static final double ZONE_WEIGHT = 0.3;
   private static final int MAX_ZONE_VISITS = 3;
 
+  // Add this constant
+  private static final double SAFETY_THRESHOLD = 3.0; // Distance threshold for safety calculations
+
   private static class EntropyMap {
     private final Map<Point, Double> heatMap = new HashMap<>();
     private long lastCleanup = System.currentTimeMillis();
 
     void updateHeat(Point pos) {
-      // Add heat to current position
       heatMap.merge(pos, 1.0, Double::sum);
-
-      // Periodic cleanup of old entries
-      if (
-        heatMap.size() > HEAT_MAP_SIZE ||
-        System.currentTimeMillis() - lastCleanup > 10000
-      ) {
-        cleanup();
-      }
+      cleanup();
     }
 
     private void cleanup() {
-      // Remove oldest/coldest entries
-      heatMap.entrySet().removeIf(entry -> entry.getValue() < 0.1);
-      lastCleanup = System.currentTimeMillis();
+      if (System.currentTimeMillis() - lastCleanup > 10000) {
+        heatMap.entrySet().removeIf(entry -> entry.getValue() < 0.1);
+        lastCleanup = System.currentTimeMillis();
+      }
     }
 
     double getHeat(Point pos) {
@@ -77,12 +78,14 @@ public class RandomMovement {
   }
 
   private static class DirectionMemory {
-    Deque<String> lastMoves = new ArrayDeque<>(MEMORY_SIZE);
-    Point lastPosition;
-    int stuckCount = 0;
-    double entropyWeight = BASE_ENTROPY_WEIGHT;
-    double momentumWeight = BASE_MOMENTUM_WEIGHT;
-    double obstacleWeight = BASE_OBSTACLE_WEIGHT;
+    private final Deque<String> lastMoves = new ArrayDeque<>(MEMORY_SIZE);
+    private Point lastPosition;
+    private int stuckCount = 0;
+
+    // Add weight fields
+    public double obstacleWeight = BASE_OBSTACLE_WEIGHT;
+    public double entropyWeight = BASE_ENTROPY_WEIGHT;
+    public double momentumWeight = BASE_MOMENTUM_WEIGHT;
 
     void addMove(String direction, Point newPosition) {
       if (lastMoves.size() >= MEMORY_SIZE) {
@@ -90,33 +93,12 @@ public class RandomMovement {
       }
       lastMoves.addFirst(direction);
 
-      // Update stuck status and adjust weights
       if (lastPosition != null && lastPosition.equals(newPosition)) {
         stuckCount++;
-        adjustWeights(true);
       } else {
         stuckCount = 0;
-        adjustWeights(false);
       }
       lastPosition = newPosition;
-    }
-
-    void adjustWeights(boolean isStuck) {
-      if (isStuck) {
-        // Reduce momentum, increase entropy when stuck
-        momentumWeight *= 0.8;
-        entropyWeight *= 1.2;
-      } else {
-        // Gradually return to base weights
-        momentumWeight = (momentumWeight + BASE_MOMENTUM_WEIGHT) / 2;
-        entropyWeight = (entropyWeight + BASE_ENTROPY_WEIGHT) / 2;
-      }
-
-      // Normalize weights
-      double total = entropyWeight + momentumWeight + obstacleWeight;
-      entropyWeight /= total;
-      momentumWeight /= total;
-      obstacleWeight /= total;
     }
 
     boolean isStuck() {
@@ -133,6 +115,8 @@ public class RandomMovement {
     int spiralDepth = 0;
     String boundaryDirection = null;
     int boundaryFollowSteps = 0;
+    int spiralTurns = 0;
+    int spiralSteps = 1;
   }
 
   private final Map<String, BoundaryState> boundaryStates = new ConcurrentHashMap<>();
@@ -179,8 +163,6 @@ public class RandomMovement {
 
   public RandomMovement(Map<String, LocalMap> agentMaps) {
     this.agentMaps = agentMaps;
-    this.directionMemory = new ConcurrentHashMap<>();
-    this.entropyMaps = new ConcurrentHashMap<>();
   }
 
   public String getNextDirection(String agName) {
@@ -188,17 +170,11 @@ public class RandomMovement {
     if (map == null) return null;
 
     Point currentPos = map.getCurrentPosition();
+    List<String> availableDirections = getAvailableDirections(map, currentPos);
 
-    // Update current zone info
-    Point currentZone = getCurrentZone(currentPos);
-    ZoneInfo currentZoneInfo = zoneMemory.computeIfAbsent(
-      currentZone,
-      k -> new ZoneInfo()
-    );
-    currentZoneInfo.visit();
-
-    // Update static obstacle information
-    updateStaticObstacleInfo(agName, map, currentPos);
+    if (availableDirections.isEmpty()) {
+      return null;
+    }
 
     DirectionMemory memory = directionMemory.computeIfAbsent(
       agName,
@@ -209,61 +185,35 @@ public class RandomMovement {
       k -> new EntropyMap()
     );
 
-    // Update entropy
-    entropyMap.updateHeat(currentPos);
+    // If stuck, try to break pattern
+    if (memory.isStuck()) {
+      return getOppositeDirection(memory.getLastDirection());
+    }
 
-    // Get available directions considering both static and dynamic obstacles
-    List<String> availableDirections = getAvailableDirections(map, currentPos);
-    if (availableDirections.isEmpty()) return null;
-
-    // Calculate comprehensive safety scores
-    Map<String, DirectionScore> directionScores = new HashMap<>();
+    // Score each available direction
+    String bestDirection = null;
+    double bestScore = Double.NEGATIVE_INFINITY;
 
     for (String direction : availableDirections) {
       Point targetPos = calculateTargetPosition(currentPos, direction);
+      double score = scoreDirection(direction, targetPos, memory, entropyMap);
 
-      double dynamicSafetyScore = getObstacleAvoidanceScore(
-        agName,
-        map,
-        currentPos,
-        targetPos
-      );
-      double staticSafetyScore = getStaticSafetyScore(
-        agName,
-        map,
-        currentPos,
-        targetPos
-      );
-      double entropyScore = 1.0 - entropyMap.getHeat(targetPos);
-      double momentumScore = getMomentumScore(direction, memory);
-      double zoneScore = getZoneScore(targetPos);
-
-      // Combine dynamic and static safety scores
-      double combinedSafetyScore = Math.min(
-        dynamicSafetyScore,
-        staticSafetyScore
-      );
-
-      directionScores.put(
-        direction,
-        new DirectionScore(
-          direction,
-          combinedSafetyScore,
-          entropyScore,
-          momentumScore,
-          zoneScore
-        )
-      );
+      if (score > bestScore) {
+        bestScore = score;
+        bestDirection = direction;
+      }
     }
 
-    // Filter and select best direction
-    String bestDirection = selectBestDirection(directionScores, memory);
+    if (bestDirection != null) {
+      Point newPos = calculateTargetPosition(currentPos, bestDirection);
+      memory.addMove(bestDirection, newPos);
+      entropyMap.updateHeat(newPos);
+      entropyMap.decayHeat();
+    }
 
-    // Update memories
-    memory.addMove(bestDirection, currentPos);
-    entropyMap.decayHeat();
-
-    return bestDirection;
+    return bestDirection != null
+      ? bestDirection
+      : availableDirections.get(random.nextInt(availableDirections.size()));
   }
 
   private List<String> getAvailableDirections(LocalMap map, Point currentPos) {
@@ -276,7 +226,53 @@ public class RandomMovement {
         available.add(dir);
       }
     }
+
     return available;
+  }
+
+  private Point calculateTargetPosition(Point current, String direction) {
+    switch (direction) {
+      case "n":
+        return new Point(current.x, current.y - 1);
+      case "s":
+        return new Point(current.x, current.y + 1);
+      case "e":
+        return new Point(current.x + 1, current.y);
+      case "w":
+        return new Point(current.x - 1, current.y);
+      default:
+        return current;
+    }
+  }
+
+  private String getOppositeDirection(String direction) {
+    if (direction == null) return null;
+    switch (direction) {
+      case "n":
+        return "s";
+      case "s":
+        return "n";
+      case "e":
+        return "w";
+      case "w":
+        return "e";
+      default:
+        return null;
+    }
+  }
+
+  private double scoreDirection(
+    String direction,
+    Point targetPos,
+    DirectionMemory memory,
+    EntropyMap entropyMap
+  ) {
+    double entropyScore = 1.0 - entropyMap.getHeat(targetPos);
+    double momentumScore = direction.equals(memory.getLastDirection())
+      ? 1.0
+      : 0.0;
+
+    return (entropyScore + momentumScore) * BASE_WEIGHT;
   }
 
   private double getObstacleAvoidanceScore(
@@ -293,12 +289,12 @@ public class RandomMovement {
     }
 
     // Get dynamic obstacles and their predicted positions
-    Map<Point, LocalMap.DynamicObstacle> dynamicObstacles = map.getDynamicObstacles();
+    Map<Point, ObstacleInfo> dynamicObstacles = map.getDynamicObstacles();
 
     if (!dynamicObstacles.isEmpty()) {
       double minDanger = 1.0;
 
-      for (LocalMap.DynamicObstacle obstacle : dynamicObstacles.values()) {
+      for (ObstacleInfo obstacle : dynamicObstacles.values()) {
         // Check current and predicted positions
         for (int step = 0; step <= PREDICTION_STEPS; step++) {
           Point predictedPos = obstacle.predictPosition(step);
@@ -392,21 +388,6 @@ public class RandomMovement {
       return lastDirection; // If no other choice, use last direction
     }
     return availableDirections.get(random.nextInt(availableDirections.size()));
-  }
-
-  private Point calculateTargetPosition(Point current, String direction) {
-    switch (direction.toLowerCase()) {
-      case "n":
-        return new Point(current.x, current.y - 1);
-      case "s":
-        return new Point(current.x, current.y + 1);
-      case "e":
-        return new Point(current.x + 1, current.y);
-      case "w":
-        return new Point(current.x - 1, current.y);
-      default:
-        return current;
-    }
   }
 
   private String handleBoundaryFollowing(
@@ -581,24 +562,26 @@ public class RandomMovement {
     String direction
   ) {
     int distance = 0;
-    Point checkPos = new Point(pos.x, pos.y);
+    int x = pos.x;
+    int y = pos.y;
 
     while (distance < BOUNDARY_AWARENESS) {
       switch (direction) {
         case "n":
-          checkPos.y--;
+          y--;
           break;
         case "s":
-          checkPos.y++;
+          y++;
           break;
         case "e":
-          checkPos.x++;
+          x++;
           break;
         case "w":
-          checkPos.x--;
+          x--;
           break;
       }
 
+      Point checkPos = new Point(x, y);
       if (map.isOutOfBounds(checkPos)) {
         return distance;
       }
@@ -619,5 +602,114 @@ public class RandomMovement {
     ZoneInfo info = zoneMemory.computeIfAbsent(zone, k -> new ZoneInfo());
     info.decay();
     return info.explorationScore;
+  }
+
+  private double calculateSafetyScore(Point targetPos, LocalMap map) {
+    Map<Point, ObstacleInfo> dynamicObstacles = map.getDynamicObstacles();
+
+    if (dynamicObstacles.isEmpty()) return 1.0;
+
+    double minDistance = Double.MAX_VALUE;
+    for (ObstacleInfo obstacle : dynamicObstacles.values()) {
+      Point obstaclePos = obstacle.getPosition();
+      double distance = euclideanDistance(targetPos, obstaclePos);
+      minDistance = Math.min(minDistance, distance);
+    }
+
+    return Math.min(1.0, minDistance / SAFETY_THRESHOLD);
+  }
+
+  private String getSpiralDirection(
+    BoundaryState state,
+    List<String> availableDirections
+  ) {
+    if (state.spiralTurns >= 4) {
+      state.spiralTurns = 0;
+      state.spiralSteps++;
+    }
+
+    String direction = null;
+    switch (state.spiralTurns) {
+      case 0:
+        direction = "n";
+        break;
+      case 1:
+        direction = "e";
+        break;
+      case 2:
+        direction = "s";
+        break;
+      case 3:
+        direction = "w";
+        break;
+    }
+
+    if (availableDirections.contains(direction)) {
+      state.spiralTurns++;
+      return direction;
+    }
+
+    // If preferred direction is not available, try the next one
+    state.spiralTurns++;
+    return getSpiralDirection(state, availableDirections);
+  }
+
+  private String getParallelDirection(
+    String boundaryDirection,
+    List<String> availableDirections
+  ) {
+    if (boundaryDirection == null) return null;
+
+    // Get directions parallel to the boundary
+    List<String> parallelDirs = new ArrayList<>();
+    switch (boundaryDirection) {
+      case "n":
+      case "s":
+        if (availableDirections.contains("e")) parallelDirs.add("e");
+        if (availableDirections.contains("w")) parallelDirs.add("w");
+        break;
+      case "e":
+      case "w":
+        if (availableDirections.contains("n")) parallelDirs.add("n");
+        if (availableDirections.contains("s")) parallelDirs.add("s");
+        break;
+    }
+
+    if (parallelDirs.isEmpty()) return null;
+    return parallelDirs.get(random.nextInt(parallelDirs.size()));
+  }
+
+  private String detectBoundaryDirection(LocalMap map) {
+    Map<String, Point> boundaries = map.getConfirmedBoundaries();
+    if (boundaries.isEmpty()) return null;
+
+    Point currentPos = map.getCurrentPosition();
+    String closestBoundary = null;
+    int minDistance = Integer.MAX_VALUE;
+
+    for (Map.Entry<String, Point> entry : boundaries.entrySet()) {
+      Point boundaryPos = entry.getValue();
+      int distance;
+
+      switch (entry.getKey()) {
+        case "n":
+        case "s":
+          distance = Math.abs(boundaryPos.y - currentPos.y);
+          break;
+        case "e":
+        case "w":
+          distance = Math.abs(boundaryPos.x - currentPos.x);
+          break;
+        default:
+          continue;
+      }
+
+      if (distance < minDistance) {
+        minDistance = distance;
+        closestBoundary = entry.getKey();
+      }
+    }
+
+    return closestBoundary;
   }
 }

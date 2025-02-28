@@ -173,10 +173,10 @@ public class MI6Model {
     long lastFailureTime = 0;
     List<MovementFailure> recentFailures = new ArrayList<>();
 
-    void recordFailure(String direction, String reason, Point position) {
+    void recordFailure(String agName, String direction, Point position) {
       consecutiveFailures++;
       lastFailureTime = System.currentTimeMillis();
-      recentFailures.add(new MovementFailure(direction, reason, position));
+      recentFailures.add(new MovementFailure(direction, "", position));
 
       // Keep only recent failures
       while (recentFailures.size() > MAX_CONSECUTIVE_FAILURES) {
@@ -282,7 +282,7 @@ public class MI6Model {
             map.getCurrentPosition(),
             direction
           );
-          map.recordObstacle(targetPos);
+          map.recordObstacle(targetPos, "static", false);
         }
 
         return handleMoveFailure(agName, direction, e, failureType);
@@ -302,7 +302,8 @@ public class MI6Model {
     Exception e,
     MoveFailureType failureType
   ) {
-    getDirectionStatus(agName, direction).recordFailure();
+    DirectionStatus status = getDirectionStatus(agName, direction);
+    status.recordFailure(agName, direction, getAgPos(agName));
 
     if (DEBUG) {
       logger.warning(
@@ -355,13 +356,6 @@ public class MI6Model {
       logger.log(Level.SEVERE, "Error in attachBlock", e);
       return false;
     }
-  }
-
-  public String chooseBestDirection(String agName, int targetX, int targetY) {
-    if (plannedMovement.isMovingToDispenser(agName)) {
-      return null;
-    }
-    return randomMovement.chooseBestDirection(agName, targetX, targetY);
   }
 
   private static class DirectionInfo {
@@ -903,5 +897,90 @@ public class MI6Model {
         );
       }
     }
+  }
+
+  public RandomMovement getRandomMovement() {
+    return randomMovement;
+  }
+
+  // Add this method to get agent position
+  private Point getAgPos(String agName) {
+    LocalMap map = getAgentMap(agName);
+    return map.getCurrentPosition();
+  }
+
+  public String chooseBestDirection(String agName, int targetX, int targetY) {
+    LocalMap map = getAgentMap(agName);
+    if (map == null) return null;
+
+    Point currentPos = map.getCurrentPosition();
+    Point targetPos = new Point(targetX, targetY);
+
+    // Get available directions that don't lead to immediate obstacles
+    List<String> availableDirections = getAvailableDirections(map, currentPos);
+    if (availableDirections.isEmpty()) return null;
+
+    // Score each direction based on distance to target
+    String bestDirection = null;
+    double bestScore = Double.NEGATIVE_INFINITY;
+
+    for (String direction : availableDirections) {
+      Point nextPos = calculateNextPosition(currentPos, direction);
+      double score = scoreDirectionToTarget(nextPos, targetPos, map);
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestDirection = direction;
+      }
+    }
+
+    return bestDirection;
+  }
+
+  private List<String> getAvailableDirections(LocalMap map, Point currentPos) {
+    List<String> available = new ArrayList<>();
+    String[] directions = { "n", "s", "e", "w" };
+
+    for (String dir : directions) {
+      Point nextPos = calculateNextPosition(currentPos, dir);
+      if (!map.hasObstacle(nextPos) && !map.isOutOfBounds(nextPos)) {
+        available.add(dir);
+      }
+    }
+
+    return available;
+  }
+
+  private Point calculateNextPosition(Point current, String direction) {
+    switch (direction) {
+      case "n":
+        return new Point(current.x, current.y - 1);
+      case "s":
+        return new Point(current.x, current.y + 1);
+      case "e":
+        return new Point(current.x + 1, current.y);
+      case "w":
+        return new Point(current.x - 1, current.y);
+      default:
+        return current;
+    }
+  }
+
+  private double scoreDirectionToTarget(
+    Point nextPos,
+    Point targetPos,
+    LocalMap map
+  ) {
+    // Base score on Manhattan distance to target
+    double distance =
+      Math.abs(nextPos.x - targetPos.x) + Math.abs(nextPos.y - targetPos.y);
+    double score = 1.0 / (1.0 + distance); // Normalize to (0,1]
+
+    // Penalize directions that lead to obstacles
+    if (map.hasObstacle(nextPos)) {
+      score *= 0.1;
+    }
+
+    return score;
   }
 }

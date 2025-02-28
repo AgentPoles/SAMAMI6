@@ -1,9 +1,3 @@
-/* Initial beliefs and rules */
-random_dir(DirList,RandomNumber,Dir) :- (RandomNumber <= 0.25 & .nth(0,DirList,Dir)) | (RandomNumber <= 0.5 & .nth(1,DirList,Dir)) | (RandomNumber <= 0.75 & .nth(2,DirList,Dir)) | (.nth(3,DirList,Dir)).
-
-/* Initial goals */
-
-!start.
 
 /* Plans */
 +goal(X,Y)[source(percept)] : true <-
@@ -26,10 +20,11 @@ random_dir(DirList,RandomNumber,Dir) :- (RandomNumber <= 0.25 & .nth(0,DirList,D
 	.print("Determining my action");
 	!move_random.
 
-+!move_random: attached(_,_) & ?helpermodels.RequestGuidance(dispenser,1,Dir)
++!move_random: attached(_,_) & helpermodels.RequestGuidance(dispenser,1,Dirs) & .nth(0,Dirs,Dir)
 <-	move(Dir);
     helpermodels.UpdateMovement(Dir).
 
-+!move_random: ?helpermodels.RequestGuidance(dispenser,1,Dir)
-<-	move(Dir);
++!move_random: helpermodels.RequestGuidance(dispenser,1,Dirs) & .nth(0,Dirs,Dir)
+<-	.print("Requesting guidance");
+    move(Dir);
     helpermodels.UpdateMovement(Dir).
