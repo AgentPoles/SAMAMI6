@@ -218,98 +218,76 @@ public class RandomMovement {
     if (map == null) return null;
 
     Point currentPos = map.getCurrentPosition();
-    List<String> availableDirections = getAvailableDirections(map, currentPos);
 
+    // Get all available directions first
+    List<String> availableDirections = new ArrayList<>();
+
+    // Check each direction for obstacles and boundaries
+    Point northPos = new Point(currentPos.x, currentPos.y - 1);
+    Point southPos = new Point(currentPos.x, currentPos.y + 1);
+    Point eastPos = new Point(currentPos.x + 1, currentPos.y);
+    Point westPos = new Point(currentPos.x - 1, currentPos.y);
+
+    if (
+      !map.hasObstacle(northPos) && !map.isOutOfBounds(northPos)
+    ) availableDirections.add("n");
+    if (
+      !map.hasObstacle(southPos) && !map.isOutOfBounds(southPos)
+    ) availableDirections.add("s");
+    if (
+      !map.hasObstacle(eastPos) && !map.isOutOfBounds(eastPos)
+    ) availableDirections.add("e");
+    if (
+      !map.hasObstacle(westPos) && !map.isOutOfBounds(westPos)
+    ) availableDirections.add("w");
+
+    // If no directions available, return null
     if (availableDirections.isEmpty()) {
+      System.out.println(
+        "[RandomMovement] " +
+        agName +
+        ": No available directions at position " +
+        currentPos
+      );
       return null;
     }
 
+    // Get memory for this agent
     DirectionMemory memory = directionMemory.computeIfAbsent(
       agName,
       k -> new DirectionMemory()
     );
-    EntropyMap entropyMap = entropyMaps.computeIfAbsent(
-      agName,
-      k -> new EntropyMap()
-    );
 
-    // If stuck, try to break pattern
+    // If we're stuck, avoid the last direction
     if (memory.isStuck()) {
-      return getBreakoutDirection(
-        availableDirections,
-        memory.getLastDirection()
-      );
+      String lastDir = memory.getLastDirection();
+      availableDirections.remove(lastDir);
+      if (availableDirections.isEmpty()) {
+        availableDirections.add(lastDir); // If no other choice, keep the last direction
+      }
     }
 
-    // Get current zone info
-    Point currentZone = getCurrentZone(currentPos);
-    AgentZoneMemory agentZoneMemory = agentZoneMemories.computeIfAbsent(
-      agName,
-      k -> new AgentZoneMemory()
+    // Choose a random available direction
+    String chosenDirection = availableDirections.get(
+      random.nextInt(availableDirections.size())
     );
-    agentZoneMemory.recordZone(currentZone);
 
-    // Score each available direction
-    String bestDirection = null;
-    double bestScore = Double.NEGATIVE_INFINITY;
+    // Update memory
+    Point newPos = calculateTargetPosition(currentPos, chosenDirection);
+    memory.addMove(chosenDirection, newPos);
 
-    // Update static obstacle information
-    updateStaticObstacleInfo(agName, map, currentPos);
+    System.out.println(
+      "[RandomMovement] " +
+      agName +
+      ": Available directions: " +
+      availableDirections +
+      ", chose: " +
+      chosenDirection +
+      " at position " +
+      currentPos
+    );
 
-    for (String direction : availableDirections) {
-      Point targetPos = calculateTargetPosition(currentPos, direction);
-
-      // Calculate comprehensive score combining all factors
-      double safetyScore =
-        getObstacleAvoidanceScore(agName, map, currentPos, targetPos) *
-        getStaticSafetyScore(agName, map, currentPos, targetPos);
-      double entropyScore = 1.0 - entropyMap.getHeat(targetPos);
-      double momentumScore = getMomentumScore(direction, memory);
-
-      // Use AgentZoneMemory for zone scoring
-      double zoneScore = agentZoneMemory.isZoneOvervisited(
-          getCurrentZone(targetPos)
-        )
-        ? 0.2
-        : 1.0;
-
-      // Combine scores with weights
-      double score =
-        (safetyScore * memory.obstacleWeight) +
-        (entropyScore * memory.entropyWeight) +
-        (momentumScore * memory.momentumWeight) +
-        (zoneScore * ZONE_WEIGHT);
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestDirection = direction;
-      }
-    }
-
-    if (bestDirection != null) {
-      Point newPos = calculateTargetPosition(currentPos, bestDirection);
-      memory.addMove(bestDirection, newPos);
-      entropyMap.updateHeat(newPos);
-      entropyMap.decayHeat();
-    }
-
-    return bestDirection != null
-      ? bestDirection
-      : availableDirections.get(random.nextInt(availableDirections.size()));
-  }
-
-  private List<String> getAvailableDirections(LocalMap map, Point currentPos) {
-    List<String> available = new ArrayList<>();
-    String[] directions = { "n", "s", "e", "w" };
-
-    for (String dir : directions) {
-      Point targetPos = calculateTargetPosition(currentPos, dir);
-      if (!map.hasObstacle(targetPos) && !map.isOutOfBounds(targetPos)) {
-        available.add(dir);
-      }
-    }
-
-    return available;
+    return chosenDirection;
   }
 
   private Point calculateTargetPosition(Point current, String direction) {

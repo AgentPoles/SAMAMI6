@@ -397,7 +397,7 @@ public class LocalMap {
         type,
         subType,
         absolutePos,
-        relativePos
+        currentAbsPos
       );
 
       entityRegistry.put(entityId, entity);
@@ -408,7 +408,7 @@ public class LocalMap {
       if (DEBUG) {
         debugTrackingMap.put(
           entityId,
-          new EntityDebugInfo(relativePos, absolutePos)
+          new EntityDebugInfo(relativePos, currentAbsPos)
         );
         logger.info(
           String.format(
@@ -464,18 +464,17 @@ public class LocalMap {
     String details,
     Point currentAbsPos
   ) {
+    addEntity(EntityType.DISPENSER, details, relativePos, currentAbsPos);
+
+    // Also maintain the legacy dispensers map for backward compatibility
     Point absolutePos = new Point(
       currentAbsPos.x + relativePos.x,
       currentAbsPos.y + relativePos.y
     );
     dispensers.put(
       absolutePos,
-      new Entity(
-        "dispenser_" + absolutePos.toString(),
-        EntityType.DISPENSER,
-        details,
-        absolutePos,
-        relativePos
+      entityRegistry.get(
+        generateEntityId(EntityType.DISPENSER, absolutePos, details)
       )
     );
   }
@@ -504,23 +503,11 @@ public class LocalMap {
         currentAbsPos.y + relativePos.y
       );
 
-      // Add to the grid (keep existing functionality)
-      if (!obstacles.contains(absolutePos)) {
-        obstacles.add(absolutePos);
-        if (DEBUG) {
-          logger.fine(
-            String.format(
-              "Added obstacle at (%d,%d) [relative: (%d,%d)]",
-              absolutePos.x,
-              absolutePos.y,
-              relativePos.x,
-              relativePos.y
-            )
-          );
-        }
-      }
+      // Add as an entity
+      addEntity(EntityType.OBSTACLE, "static", relativePos, currentAbsPos);
 
-      // Also add to static obstacles info
+      // Maintain legacy collections for backward compatibility
+      obstacles.add(absolutePos);
       staticObstacles.putIfAbsent(
         absolutePos,
         new ObstacleInfo(absolutePos, "static", false)
@@ -529,19 +516,16 @@ public class LocalMap {
   }
 
   public void addGoal(Point relativePos, Point currentAbsPos) {
+    addEntity(EntityType.GOAL, "goal", relativePos, currentAbsPos);
+
+    // Also maintain the legacy goals map for backward compatibility
     Point absolutePos = new Point(
       currentAbsPos.x + relativePos.x,
       currentAbsPos.y + relativePos.y
     );
     goals.put(
       absolutePos,
-      new Entity(
-        "goal_" + absolutePos.toString(),
-        EntityType.GOAL,
-        "goal",
-        absolutePos,
-        relativePos
-      )
+      entityRegistry.get(generateEntityId(EntityType.GOAL, absolutePos, "goal"))
     );
   }
 
@@ -1059,12 +1043,21 @@ public class LocalMap {
     }
   }
 
-  public void recordObstacle(Point position) {
-    recordObstacle(position, "static", false);
-  }
-
   public void recordObstacle(Point position, String type, boolean isDynamic) {
-    staticObstacles.put(position, new ObstacleInfo(position, type, isDynamic));
+    // Add as an entity using relative coordinates
+    Point relativePos = new Point(
+      position.x - currentPosition.x,
+      position.y - currentPosition.y
+    );
+    addEntity(EntityType.OBSTACLE, type, relativePos, currentPosition);
+
+    // Maintain legacy collections
+    if (isDynamic) {
+      dynamicObstacles.put(position, new ObstacleInfo(position, type, true));
+    } else {
+      staticObstacles.put(position, new ObstacleInfo(position, type, false));
+      obstacles.add(position);
+    }
   }
 
   public Point getBoundaryPosition(String direction) {

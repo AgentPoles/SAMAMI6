@@ -53,9 +53,9 @@ public class RequestGuidance extends DefaultInternalAction {
         randomDir
       );
 
-      // Create a list with single direction
+      // Create a list with single direction as an Atom
       ListTerm dirList = new ListTermImpl();
-      dirList.add(new StringTermImpl(randomDir));
+      dirList.add(new Atom(randomDir));
 
       // Unify with output variable
       return un.unifies(dirList, outputTerm);
