@@ -107,6 +107,8 @@ public class RandomMovement implements MovementStrategy {
   private static final int AGENT_CRITICAL_DISTANCE = 1; // Direct adjacency
   private static final int AGENT_AWARENESS_DISTANCE = 3; // Awareness radius
 
+  private final Exploration exploration = new Exploration();
+
   private class DirectionMemory {
     private final Deque<String> lastMoves = new ArrayDeque<>(MEMORY_SIZE);
     private Point lastPosition;
@@ -386,45 +388,32 @@ public class RandomMovement implements MovementStrategy {
     LocalMap map
   ) {
     String agName = Thread.currentThread().getName();
-
-    if (DEBUG) {
-      // Log agent's current state
-      logger.info(
-        String.format(
-          "[%s] AGENT STATUS - Position: %s, Considering directions: %s",
-          agName,
-          currentPos,
-          String.join(", ", availableDirections)
-        )
-      );
-    }
-
     Map<String, Double> scores = new HashMap<>();
 
     for (String direction : availableDirections) {
-      Point targetPos = calculateNextPosition(currentPos, direction);
-
-      // Add randomization factor to prevent getting stuck in patterns
+      // Base random factor
       double randomFactor = 0.8 + random.nextDouble() * 0.4;
-      double score = randomFactor;
 
-      // Debug logging for direction scoring
-      if (DEBUG) {
-        logger.info(
-          String.format(
-            "[%s] MOVE EVALUATION - Direction %s to pos %s scored: %.2f (random=%.2f)",
-            agName,
-            direction,
-            targetPos,
-            score,
-            randomFactor
-          )
-        );
-      }
+      // Exploration score
+      double explorationScore = exploration.scoreDirection(
+        agName,
+        currentPos,
+        direction,
+        map
+      );
 
-      scores.put(direction, score);
+      // Safety score (existing obstacle avoidance)
+      Point nextPos = calculateNextPosition(currentPos, direction);
+      double safetyScore = evaluatePosition(nextPos, map);
+
+      // Combine scores
+      double finalScore =
+        (explorationScore * 0.4) + (safetyScore * 0.4) + (randomFactor * 0.2);
+
+      scores.put(direction, finalScore);
     }
 
+    // Choose best direction
     String chosen = scores
       .entrySet()
       .stream()
@@ -432,19 +421,8 @@ public class RandomMovement implements MovementStrategy {
       .map(Map.Entry::getKey)
       .orElseGet(() -> getRandomDirection(availableDirections));
 
-    // Debug log the final decision
-    if (DEBUG) {
-      logger.info(
-        String.format(
-          "[%s] MOVE DECISION - At pos %s chose direction %s (score=%.2f) from scores %s",
-          agName,
-          currentPos,
-          chosen,
-          scores.get(chosen),
-          scores
-        )
-      );
-    }
+    // Record the visit after choosing direction
+    exploration.recordVisit(agName, currentPos);
 
     return chosen;
   }

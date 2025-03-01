@@ -59,7 +59,6 @@
 // Error handling with debug
 -!move_random(Target)[error(Error), error_msg(Msg)] : true <-
     .print("ERROR in move_random: ", Error, " - ", Msg);
-    .wait(500);
     !move_random(Target).
 
 // Catch-all for unhandled failures
