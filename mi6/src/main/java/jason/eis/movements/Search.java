@@ -9,7 +9,14 @@ import java.util.logging.Logger;
 public class Search {
   private static final Logger logger = Logger.getLogger(Search.class.getName());
   private static final boolean DEBUG = false;
-  private static final int MAX_ITERATIONS = 200;
+
+  // Iteration limits for different search types
+  private static final int QUICK_PATH_ITERATIONS = 50;
+  private static final int FALLBACK_ITERATIONS = 25;
+  private static final int NEARBY_ITERATIONS = 15;
+  private static final int MINIMUM_PROGRESS = 5;
+
+  // Existing constants
   private static final String[] DIRECTIONS = { "n", "e", "s", "w" };
   private static final Map<String, Point> DIRECTION_VECTORS = new HashMap<>();
   private final ObstacleManager obstacleManager;
@@ -59,30 +66,41 @@ public class Search {
         return new PathResult(new ArrayList<>(), new ArrayList<>(), false);
       }
 
-      // Try direct path first
-      if (isNearby(start, target)) {
-        PathResult direct = findDirectPath(
+      int distance = (int) getManhattanDistance(start, target);
+
+      // For very close targets, use quick direct path
+      if (distance <= 10) {
+        PathResult quickPath = findQuickPath(
           start,
           target,
           map,
           agentSize,
-          blockDirection
+          blockDirection,
+          NEARBY_ITERATIONS
         );
-        if (direct.success) return direct;
+        if (quickPath.success) return quickPath;
       }
 
-      // Try waypoint path
-      PathResult waypoint = findWaypointPath(
+      // Try to find complete path with limited iterations
+      PathResult completePath = findOptimalPath(
         start,
         target,
         map,
         agentSize,
-        blockDirection
+        blockDirection,
+        QUICK_PATH_ITERATIONS
       );
-      if (waypoint.success) return waypoint;
+      if (completePath.success) return completePath;
 
-      // Fall back to progressive path if others fail
-      return findProgressivePath(start, target, map, agentSize, blockDirection);
+      // If complete path fails, try partial progress
+      return findProgressivePath(
+        start,
+        target,
+        map,
+        agentSize,
+        blockDirection,
+        FALLBACK_ITERATIONS
+      );
     } catch (Exception e) {
       logger.warning("Path finding error: " + e.getMessage());
       return new PathResult(new ArrayList<>(), new ArrayList<>(), false);
@@ -140,19 +158,20 @@ public class Search {
     return Math.abs(start.x - target.x) + Math.abs(start.y - target.y) <= 10;
   }
 
-  private PathResult findDirectPath(
+  private PathResult findQuickPath(
     Point start,
     Point target,
     LocalMap map,
     int agentSize,
-    String blockDirection
+    String blockDirection,
+    int maxIterations
   ) {
     List<String> directions = new ArrayList<>();
     List<Point> points = new ArrayList<>();
     Point current = start;
 
     int iterations = 0;
-    while (!current.equals(target) && iterations < MAX_ITERATIONS) {
+    while (!current.equals(target) && iterations < maxIterations) {
       String direction = getNextDirection(
         current,
         target,
@@ -187,109 +206,161 @@ public class Search {
     return new PathResult(directions, points, success);
   }
 
-  private PathResult findWaypointPath(
+  private PathResult findOptimalPath(
     Point start,
     Point target,
     LocalMap map,
     int agentSize,
-    String blockDirection
+    String blockDirection,
+    int maxIterations
   ) {
-    List<Point> waypoints = new ArrayList<>();
-    waypoints.add(start);
+    SearchState state = new SearchState();
+    Queue<SearchNode> queue = new PriorityQueue<>(
+      Comparator.comparingDouble(n -> n.fScore)
+    );
+    Set<Point> visited = new HashSet<>();
 
+    queue.offer(
+      new SearchNode(start, null, 0, getManhattanDistance(start, target))
+    );
+
+    int iterations = 0;
+    while (!queue.isEmpty() && iterations < maxIterations) {
+      SearchNode current = queue.poll();
+
+      if (current.position.equals(target)) {
+        return reconstructPath(current);
+      }
+
+      if (visited.contains(current.position)) continue;
+      visited.add(current.position);
+
+      // Update best partial path if this is better
+      updateBestPartialPath(current, target, state);
+
+      // Try all possible directions
+      for (String dir : DIRECTIONS) {
+        if (
+          !isValidMove(current.position, dir, map, agentSize, blockDirection)
+        ) continue;
+
+        Point next = getNextPoint(current.position, dir);
+        double newG = current.gScore + 1;
+        double newF = newG + getManhattanDistance(next, target);
+
+        queue.offer(new SearchNode(next, current, newG, newF, dir));
+      }
+
+      iterations++;
+    }
+
+    // Return best partial path if we found something useful
+    if (state.bestProgress >= MINIMUM_PROGRESS) {
+      return new PathResult(state.bestDirections, state.bestPoints, true);
+    }
+
+    return new PathResult(new ArrayList<>(), new ArrayList<>(), false);
+  }
+
+  private PathResult findProgressivePath(
+    Point start,
+    Point target,
+    LocalMap map,
+    int agentSize,
+    String blockDirection,
+    int maxIterations
+  ) {
+    List<String> directions = new ArrayList<>();
+    List<Point> points = new ArrayList<>();
     Point current = start;
-    while (!isNearby(current, target)) {
-      Point waypoint = findNextWaypoint(
+    double initialDist = getManhattanDistance(start, target);
+
+    int iterations = 0;
+    while (!current.equals(target) && iterations < maxIterations) {
+      String bestDir = findBestDirection(
         current,
         target,
         map,
         agentSize,
         blockDirection
       );
-      if (waypoint == null) break;
+      if (bestDir == null) break;
 
-      waypoints.add(waypoint);
-      current = waypoint;
+      Point next = getNextPoint(current, bestDir);
+      points.add(next);
+      directions.add(bestDir);
+      current = next;
+
+      // Stop if we're not making progress
+      if (
+        iterations > MINIMUM_PROGRESS &&
+        getManhattanDistance(current, target) >= initialDist
+      ) {
+        break;
+      }
+
+      iterations++;
     }
-    waypoints.add(target);
 
-    return connectWaypoints(waypoints, map, agentSize, blockDirection);
+    return new PathResult(directions, points, !points.isEmpty());
   }
 
-  private Point findNextWaypoint(
+  private String findBestDirection(
     Point current,
     Point target,
     LocalMap map,
     int agentSize,
     String blockDirection
   ) {
-    int dx = target.x - current.x;
-    int dy = target.y - current.y;
-    int distance = 10;
+    String bestDir = null;
+    double bestScore = Double.NEGATIVE_INFINITY;
 
-    Point[] candidates = {
-      new Point(
-        current.x + (int) (distance * Math.signum(dx)),
-        current.y + (int) (distance * Math.signum(dy))
-      ),
-      new Point(current.x + (int) (distance * Math.signum(dx)), current.y),
-      new Point(current.x, current.y + (int) (distance * Math.signum(dy))),
-    };
+    for (String dir : DIRECTIONS) {
+      if (!isValidMove(current, dir, map, agentSize, blockDirection)) continue;
 
-    for (Point candidate : candidates) {
-      if (isSafePoint(candidate, map, agentSize, blockDirection)) {
-        return candidate;
+      Point next = getNextPoint(current, dir);
+      double score = scorePosition(next, target, map);
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestDir = dir;
       }
     }
 
-    return null;
+    return bestDir;
   }
 
-  private boolean isSafePoint(
-    Point point,
-    LocalMap map,
-    int agentSize,
-    String blockDirection
-  ) {
-    return (
-      obstacleManager
-        .filterDirections(
-          Arrays.asList(DIRECTIONS),
-          map,
-          point,
-          agentSize,
-          blockDirection
-        )
-        .size() >
-      0
-    );
+  private double scorePosition(Point pos, Point target, LocalMap map) {
+    double distanceScore = -getManhattanDistance(pos, target);
+    int clearSpace = countClearDirections(pos, map);
+    return distanceScore + (clearSpace * 0.1); // Weight clear space less than distance
   }
 
-  private PathResult connectWaypoints(
-    List<Point> waypoints,
-    LocalMap map,
-    int agentSize,
-    String blockDirection
-  ) {
-    List<String> finalDirections = new ArrayList<>();
-    List<Point> finalPoints = new ArrayList<>();
+  private static class SearchState {
+    List<String> bestDirections = new ArrayList<>();
+    List<Point> bestPoints = new ArrayList<>();
+    double bestScore = Double.NEGATIVE_INFINITY;
+    int bestProgress = 0;
+  }
 
-    for (int i = 0; i < waypoints.size() - 1; i++) {
-      PathResult segment = findDirectPath(
-        waypoints.get(i),
-        waypoints.get(i + 1),
-        map,
-        agentSize,
-        blockDirection
-      );
-      if (!segment.success) continue;
+  private static class SearchNode {
+    Point position;
+    SearchNode parent;
+    String direction;
+    double gScore;
+    double fScore;
 
-      finalPoints.addAll(segment.points);
-      finalDirections.addAll(segment.directions);
+    SearchNode(Point pos, SearchNode parent, double g, double f) {
+      this(pos, parent, g, f, null);
     }
 
-    boolean success = !finalPoints.isEmpty();
-    return new PathResult(finalDirections, finalPoints, success);
+    SearchNode(Point pos, SearchNode parent, double g, double f, String dir) {
+      this.position = pos;
+      this.parent = parent;
+      this.gScore = g;
+      this.fScore = f;
+      this.direction = dir;
+    }
   }
 
   private String getNextDirection(
@@ -328,77 +399,6 @@ public class Search {
     return new Point(current.x + vector.x, current.y + vector.y);
   }
 
-  private PathResult findProgressivePath(
-    Point start,
-    Point target,
-    LocalMap map,
-    int agentSize,
-    String blockDirection
-  ) {
-    List<String> directions = new ArrayList<>();
-    List<Point> points = new ArrayList<>();
-    Point current = start;
-    double initialDist = getManhattanDistance(start, target);
-
-    int iterations = 0;
-    while (!current.equals(target) && iterations < MAX_ITERATIONS) {
-      // Get best next move
-      String bestDir = null;
-      double bestScore = Double.NEGATIVE_INFINITY;
-
-      List<String> validDirs = obstacleManager.filterDirections(
-        Arrays.asList(DIRECTIONS),
-        map,
-        current,
-        agentSize,
-        blockDirection
-      );
-
-      for (String dir : validDirs) {
-        Point next = getNextPoint(current, dir);
-        double score = scoreMove(next, target, current, map);
-        if (score > bestScore) {
-          bestScore = score;
-          bestDir = dir;
-        }
-      }
-
-      if (bestDir == null) break;
-
-      Point next = getNextPoint(current, bestDir);
-      points.add(next);
-      directions.add(bestDir);
-      current = next;
-      iterations++;
-
-      // Break if we're not making progress after several attempts
-      if (
-        iterations > 10 && getManhattanDistance(current, target) >= initialDist
-      ) {
-        break;
-      }
-    }
-
-    boolean success = !points.isEmpty();
-    return new PathResult(directions, points, success);
-  }
-
-  private double scoreMove(
-    Point next,
-    Point target,
-    Point current,
-    LocalMap map
-  ) {
-    // Progress towards target (negative distance as we want to minimize it)
-    double distanceScore = -getManhattanDistance(next, target);
-
-    // Clear space around point (normalized to 0-1)
-    double clearance = countClearDirections(next, map) / 4.0;
-
-    // Combine scores with weights
-    return (distanceScore * PROGRESS_WEIGHT) + (clearance * CLEARANCE_WEIGHT);
-  }
-
   private int countClearDirections(Point pos, LocalMap map) {
     int clear = 0;
     for (String dir : DIRECTIONS) {
@@ -412,5 +412,47 @@ public class Search {
 
   private double getManhattanDistance(Point a, Point b) {
     return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+  }
+
+  private boolean isValidMove(
+    Point current,
+    String direction,
+    LocalMap map,
+    int agentSize,
+    String blockDirection
+  ) {
+    Point next = getNextPoint(current, direction);
+    return !map.isForbidden(next) && !map.hasObstacle(next);
+  }
+
+  private void updateBestPartialPath(
+    SearchNode current,
+    Point target,
+    SearchState state
+  ) {
+    PathResult path = reconstructPath(current);
+    if (current.position.equals(target)) {
+      state.bestDirections = path.directions;
+      state.bestPoints = path.points;
+      state.bestProgress = 0;
+    } else {
+      state.bestProgress++;
+    }
+  }
+
+  private PathResult reconstructPath(SearchNode node) {
+    List<String> directions = new ArrayList<>();
+    List<Point> points = new ArrayList<>();
+
+    SearchNode current = node;
+    while (current != null && current.parent != null) {
+      if (current.direction != null) {
+        directions.add(0, current.direction);
+        points.add(0, current.position);
+      }
+      current = current.parent;
+    }
+
+    return new PathResult(directions, points, true);
   }
 }
