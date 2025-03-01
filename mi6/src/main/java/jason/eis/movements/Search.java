@@ -13,6 +13,8 @@ public class Search {
   private static final String[] DIRECTIONS = { "n", "e", "s", "w" };
   private static final Map<String, Point> DIRECTION_VECTORS = new HashMap<>();
   private final ObstacleManager obstacleManager;
+  private static final double PROGRESS_WEIGHT = 0.8; // Weight for progress towards target
+  private static final double CLEARANCE_WEIGHT = 0.2; // Weight for clear space
 
   static {
     DIRECTION_VECTORS.put("n", new Point(0, -1));
@@ -57,11 +59,30 @@ public class Search {
         return new PathResult(new ArrayList<>(), new ArrayList<>(), false);
       }
 
+      // Try direct path first
       if (isNearby(start, target)) {
-        return findDirectPath(start, target, map, agentSize, blockDirection);
+        PathResult direct = findDirectPath(
+          start,
+          target,
+          map,
+          agentSize,
+          blockDirection
+        );
+        if (direct.success) return direct;
       }
 
-      return findWaypointPath(start, target, map, agentSize, blockDirection);
+      // Try waypoint path
+      PathResult waypoint = findWaypointPath(
+        start,
+        target,
+        map,
+        agentSize,
+        blockDirection
+      );
+      if (waypoint.success) return waypoint;
+
+      // Fall back to progressive path if others fail
+      return findProgressivePath(start, target, map, agentSize, blockDirection);
     } catch (Exception e) {
       logger.warning("Path finding error: " + e.getMessage());
       return new PathResult(new ArrayList<>(), new ArrayList<>(), false);
@@ -305,5 +326,91 @@ public class Search {
     Point vector = DIRECTION_VECTORS.get(direction);
     if (vector == null) return current;
     return new Point(current.x + vector.x, current.y + vector.y);
+  }
+
+  private PathResult findProgressivePath(
+    Point start,
+    Point target,
+    LocalMap map,
+    int agentSize,
+    String blockDirection
+  ) {
+    List<String> directions = new ArrayList<>();
+    List<Point> points = new ArrayList<>();
+    Point current = start;
+    double initialDist = getManhattanDistance(start, target);
+
+    int iterations = 0;
+    while (!current.equals(target) && iterations < MAX_ITERATIONS) {
+      // Get best next move
+      String bestDir = null;
+      double bestScore = Double.NEGATIVE_INFINITY;
+
+      List<String> validDirs = obstacleManager.filterDirections(
+        Arrays.asList(DIRECTIONS),
+        map,
+        current,
+        agentSize,
+        blockDirection
+      );
+
+      for (String dir : validDirs) {
+        Point next = getNextPoint(current, dir);
+        double score = scoreMove(next, target, current, map);
+        if (score > bestScore) {
+          bestScore = score;
+          bestDir = dir;
+        }
+      }
+
+      if (bestDir == null) break;
+
+      Point next = getNextPoint(current, bestDir);
+      points.add(next);
+      directions.add(bestDir);
+      current = next;
+      iterations++;
+
+      // Break if we're not making progress after several attempts
+      if (
+        iterations > 10 && getManhattanDistance(current, target) >= initialDist
+      ) {
+        break;
+      }
+    }
+
+    boolean success = !points.isEmpty();
+    return new PathResult(directions, points, success);
+  }
+
+  private double scoreMove(
+    Point next,
+    Point target,
+    Point current,
+    LocalMap map
+  ) {
+    // Progress towards target (negative distance as we want to minimize it)
+    double distanceScore = -getManhattanDistance(next, target);
+
+    // Clear space around point (normalized to 0-1)
+    double clearance = countClearDirections(next, map) / 4.0;
+
+    // Combine scores with weights
+    return (distanceScore * PROGRESS_WEIGHT) + (clearance * CLEARANCE_WEIGHT);
+  }
+
+  private int countClearDirections(Point pos, LocalMap map) {
+    int clear = 0;
+    for (String dir : DIRECTIONS) {
+      Point next = getNextPoint(pos, dir);
+      if (!map.isForbidden(next)) {
+        clear++;
+      }
+    }
+    return clear;
+  }
+
+  private double getManhattanDistance(Point a, Point b) {
+    return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
   }
 }
