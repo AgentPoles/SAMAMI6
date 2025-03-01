@@ -1,5 +1,7 @@
 package jason.eis.movements;
 
+import static jason.eis.movements.Exploration.RecomputeReason;
+
 import jason.eis.LocalMap;
 import jason.eis.LocalMap.ObstacleInfo;
 import jason.eis.MI6Model;
@@ -14,6 +16,10 @@ public class RandomMovement implements MovementStrategy {
   private static final Logger logger = Logger.getLogger(
     RandomMovement.class.getName()
   );
+  private static final int STUCK_THRESHOLD_STEPS = 3;
+  private static final int HIGH_TRAFFIC_THRESHOLD = 2;
+  private static final long PATH_TIMEOUT_MS = 10000; // 10 seconds
+
   private static final boolean DEBUG = true;
   private static final int MEMORY_SIZE = 5;
   private static final int ZONE_SIZE = 5;
@@ -69,6 +75,9 @@ public class RandomMovement implements MovementStrategy {
 
   // Add repulsion from starting zone
   private static final int STARTING_ZONE_REPULSION = 20; // Distance to maintain from start
+
+  private final Map<String, Integer> stuckCounter = new ConcurrentHashMap<>();
+  private final Map<String, Long> pathStartTimes = new ConcurrentHashMap<>();
 
   // Add ZoneInfo class
   private static class ZoneInfo {
@@ -475,54 +484,100 @@ public class RandomMovement implements MovementStrategy {
       agName,
       k -> new DirectionMemory()
     );
-    Map<String, Double> scores = new HashMap<>();
 
-    // Check if we're stuck (current position equals last position)
-    boolean isStuck = memory.isStuck(currentPos);
-    String lastDirection = memory.getLastRecommendedDirection();
-
-    for (String direction : availableDirections) {
-      // Base random factor
-      double randomFactor = 0.8 + random.nextDouble() * 0.4;
-
-      // Exploration score
-      double explorationScore = exploration.scoreDirection(
-        agName,
-        currentPos,
-        direction,
-        map
-      );
-
-      // Safety score
-      Point nextPos = calculateNextPosition(currentPos, direction);
-      double safetyScore = evaluatePosition(nextPos, map);
-
-      // Direction penalty if stuck
-      double directionPenalty = 1.0;
-      if (isStuck && direction.equals(lastDirection)) {
-        directionPenalty = 0.2; // Heavy penalty for trying the same failed direction
-      }
-
-      // Combine scores
-      double finalScore =
-        (
-          (explorationScore * 0.4) + (safetyScore * 0.4) + (randomFactor * 0.2)
-        ) *
-        directionPenalty;
-      scores.put(direction, finalScore);
+    // Check if we need to recompute path
+    RecomputeReason reason = checkRecomputePath(agName, currentPos, map);
+    if (reason != null) {
+      exploration.triggerPathRecompute(agName, currentPos, map, reason);
+      stuckCounter.remove(agName);
     }
 
-    // Choose best direction
-    String chosenDirection = scores
-      .entrySet()
-      .stream()
-      .max(Map.Entry.comparingByValue())
-      .map(Map.Entry::getKey)
-      .orElseGet(() -> getRandomDirection(availableDirections));
+    // Quick safety check for immediate dangers
+    if (isNearAgent(currentPos, map)) {
+      String safeDir = handleAgentCollision(memory, availableDirections, map);
+      if (safeDir != null) {
+        memory.addMove(safeDir, currentPos);
+        exploration.triggerPathRecompute(
+          agName,
+          calculateNextPosition(currentPos, safeDir),
+          map,
+          RecomputeReason.HIGH_TRAFFIC
+        );
+        return safeDir;
+      }
+    }
 
-    // Update memory with new move
-    memory.addMove(chosenDirection, currentPos);
-    return chosenDirection;
+    // Check if we're stuck and need recovery
+    boolean isStuck = memory.isStuck(currentPos);
+    if (isStuck && memory.shouldAttemptRecovery()) {
+      String recoveryDir = memory.getRecoveryDirection(
+        availableDirections,
+        memory.getLastDirection()
+      );
+      memory.addMove(recoveryDir, currentPos);
+      exploration.triggerPathRecompute(
+        agName,
+        calculateNextPosition(currentPos, recoveryDir),
+        map,
+        RecomputeReason.STUCK
+      );
+      return recoveryDir;
+    }
+    // Get current exploration path
+    Exploration.PathResult path = exploration.getActivePath(agName);
+    String chosenDir = null;
+
+    if (path != null && !path.directions.isEmpty()) {
+      String nextPathStep = path.directions.get(0);
+      if (availableDirections.contains(nextPathStep)) {
+        Point nextPos = calculateNextPosition(currentPos, nextPathStep);
+        if (!isNearAgent(nextPos, map)) {
+          chosenDir = nextPathStep;
+        }
+      }
+    }
+
+    // If no valid direction chosen yet, score available directions
+    if (chosenDir == null) {
+      Map<String, Double> scores = new HashMap<>();
+      for (String dir : availableDirections) {
+        Point nextPos = calculateNextPosition(currentPos, dir);
+        double score = exploration.scoreDirection(agName, currentPos, dir, map);
+        scores.put(dir, score);
+      }
+
+      chosenDir =
+        scores
+          .entrySet()
+          .stream()
+          .max(Map.Entry.comparingByValue())
+          .map(Map.Entry::getKey)
+          .orElse(null);
+    }
+
+    // If still no valid direction, choose random direction avoiding previous
+    if (chosenDir == null) {
+      String lastDir = memory.getLastDirection();
+      List<String> validDirs = new ArrayList<>(availableDirections);
+      if (lastDir != null) {
+        validDirs.remove(lastDir);
+      }
+      if (!validDirs.isEmpty()) {
+        chosenDir = validDirs.get(random.nextInt(validDirs.size()));
+      } else if (!availableDirections.isEmpty()) {
+        // If no other options, use any available direction
+        chosenDir =
+          availableDirections.get(random.nextInt(availableDirections.size()));
+      } else {
+        // Fallback to default direction if no available directions
+        chosenDir = "n";
+      }
+    }
+
+    Point nextPos = calculateNextPosition(currentPos, chosenDir);
+    exploration.triggerPathRecompute(agName, nextPos, map, null);
+    memory.addMove(chosenDir, currentPos);
+    return chosenDir;
   }
 
   private double evaluatePosition(Point targetPos, LocalMap map) {
@@ -1440,5 +1495,56 @@ public class RandomMovement implements MovementStrategy {
       map,
       hasBlock
     );
+  }
+
+  private RecomputeReason checkRecomputePath(
+    String agName,
+    Point currentPos,
+    LocalMap map
+  ) {
+    // Check for path timeout
+    Long pathStart = pathStartTimes.get(agName);
+    if (
+      pathStart != null &&
+      System.currentTimeMillis() - pathStart > PATH_TIMEOUT_MS
+    ) {
+      return RecomputeReason.EXPLORATION_TIMEOUT;
+    }
+
+    // Check if path is blocked
+    Exploration.PathResult currentPath = exploration.getActivePath(agName);
+    if (currentPath != null && !currentPath.points.isEmpty()) {
+      Point nextPoint = currentPath.points.get(0);
+      if (map.hasObstacle(nextPoint) || map.isOutOfBounds(nextPoint)) {
+        return RecomputeReason.PATH_BLOCKED;
+      }
+    }
+
+    // Check for stuck condition
+    DirectionMemory memory = directionMemory.get(agName);
+    if (memory != null && memory.isStuck(currentPos)) {
+      int stuck = stuckCounter.compute(agName, (k, v) -> v == null ? 1 : v + 1);
+      if (stuck >= STUCK_THRESHOLD_STEPS) {
+        return RecomputeReason.STUCK;
+      }
+    } else {
+      stuckCounter.remove(agName);
+    }
+
+    // Check for high traffic
+    Point zone = getCurrentZone(currentPos);
+    ZoneInfo info = zoneMemory.get(zone);
+    if (info != null && info.visits >= HIGH_TRAFFIC_THRESHOLD) {
+      return RecomputeReason.HIGH_TRAFFIC;
+    }
+
+    return null;
+  }
+
+  public void recordVisit(String agName, Point position) {
+    // Record path start time when starting new exploration
+    if (!pathStartTimes.containsKey(agName)) {
+      pathStartTimes.put(agName, System.currentTimeMillis());
+    }
   }
 }
