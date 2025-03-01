@@ -113,6 +113,7 @@ public class RandomMovement implements MovementStrategy {
   private class DirectionMemory {
     private final Deque<String> lastMoves = new ArrayDeque<>(MEMORY_SIZE);
     private Point lastPosition;
+    private String lastRecommendedDirection;
     private int stuckCount = 0;
     private int recoveryAttempts = 0;
     private long lastStuckTime = 0;
@@ -133,6 +134,49 @@ public class RandomMovement implements MovementStrategy {
         lastMoves.removeLast();
       }
       lastMoves.addFirst(direction);
+    }
+
+    void addMove(String direction, Point position) {
+      // Add position validation logging
+      System.out.println(
+        "DirectionMemory: Updating position from " +
+        lastPosition +
+        " to " +
+        position +
+        " with direction " +
+        direction
+      );
+
+      // Validate position change
+      if (lastPosition != null) {
+        int dx = Math.abs(position.x - lastPosition.x);
+        int dy = Math.abs(position.y - lastPosition.y);
+        if (dx > 1 || dy > 1) {
+          System.out.println(
+            "WARNING: Large position change detected! " +
+            "dx=" +
+            dx +
+            ", dy=" +
+            dy
+          );
+        }
+      }
+
+      // If we moved successfully, clear recovery state
+      if (lastPosition != null && !lastPosition.equals(position)) {
+        clearCollisionMemory();
+      }
+      lastPosition = position;
+      lastRecommendedDirection = direction;
+      addMove(direction); // Update move history
+    }
+
+    String getLastRecommendedDirection() {
+      return lastRecommendedDirection;
+    }
+
+    boolean isStuck(Point currentPos) {
+      return lastPosition != null && lastPosition.equals(currentPos);
     }
 
     String getLastDirection() {
@@ -302,7 +346,7 @@ public class RandomMovement implements MovementStrategy {
   ) {
     if (map == null) {
       logger.warning("Map is null for agent " + agName);
-      return "e"; // Default direction
+      return "e";
     }
 
     Point currentPos = map.getCurrentPosition();
@@ -317,7 +361,6 @@ public class RandomMovement implements MovementStrategy {
           map.getConfirmedBoundariesPositions()
         )
       );
-      map.logBoundaryState();
     }
 
     List<String> availableDirections = Arrays
@@ -331,7 +374,7 @@ public class RandomMovement implements MovementStrategy {
           if (DEBUG && forbidden) {
             logger.info(
               String.format(
-                "[%s] FORBIDDEN MOVE - Direction %s to %s is forbidden (obstacle or boundary)",
+                "[%s] FORBIDDEN MOVE - Direction %s to %s is forbidden",
                 agName,
                 dir,
                 next
@@ -354,40 +397,72 @@ public class RandomMovement implements MovementStrategy {
         blockDirection
       );
 
-    if (DEBUG) {
-      logger.info(
-        String.format(
-          "[%s] AVAILABLE MOVES - From %s can move: %s",
-          agName,
-          currentPos,
-          availableDirections.isEmpty()
-            ? "none"
-            : String.join(", ", availableDirections)
-        )
-      );
-    }
-
-    // If no available moves, try to find a safe direction
+    // Handle boundary case when no directions are available
     if (availableDirections.isEmpty()) {
-      if (DEBUG) {
-        logger.warning(
-          String.format(
-            "[%s] NO AVAILABLE MOVES at %s - Attempting recovery",
+      DirectionMemory memory = directionMemory.computeIfAbsent(
+        agName,
+        k -> new DirectionMemory()
+      );
+      Map<String, Point> boundaries = map.getConfirmedBoundariesPositions();
+
+      if (!boundaries.isEmpty()) {
+        // Try opposite direction of boundary first
+        for (String boundaryDir : boundaries.keySet()) {
+          String oppositeDir = getOppositeDirection(boundaryDir);
+          if (isMovePossible(map, currentPos, oppositeDir)) {
+            logger.info(
+              String.format(
+                "[%s] Attempting boundary escape: trying opposite direction %s",
+                agName,
+                oppositeDir
+              )
+            );
+            memory.recoveryAttempts++;
+            return oppositeDir;
+          }
+        }
+
+        // If opposite fails, try perpendicular directions
+        for (String boundaryDir : boundaries.keySet()) {
+          List<String> perpendicularDirs = getPerpendicularDirections(
+            boundaryDir
+          );
+          for (String dir : perpendicularDirs) {
+            if (isMovePossible(map, currentPos, dir)) {
+              logger.info(
+                String.format(
+                  "[%s] Attempting boundary escape: trying perpendicular direction %s",
+                  agName,
+                  dir
+                )
+              );
+              memory.recoveryAttempts++;
+              return dir;
+            }
+          }
+        }
+
+        // If we've tried multiple times without success, delegate to collision handler
+        if (memory.recoveryAttempts >= 3) {
+          logger.info(
+            String.format(
+              "[%s] Boundary recovery failed after %d attempts, delegating to collision handler",
+              agName,
+              memory.recoveryAttempts
+            )
+          );
+          return handleCollision(
             agName,
-            currentPos
-          )
-        );
+            currentPos,
+            map,
+            blockDirection != null
+          );
+        }
       }
-      return null; // Let the agent's decision-making handle the stuck situation
     }
 
-    // Use our improved direction selection
-    String chosenDirection = chooseDirection(
-      currentPos,
-      availableDirections,
-      map
-    );
-    return chosenDirection;
+    // Use regular direction selection if we have available directions
+    return chooseDirection(currentPos, availableDirections, map);
   }
 
   private String chooseDirection(
@@ -396,7 +471,15 @@ public class RandomMovement implements MovementStrategy {
     LocalMap map
   ) {
     String agName = Thread.currentThread().getName();
+    DirectionMemory memory = directionMemory.computeIfAbsent(
+      agName,
+      k -> new DirectionMemory()
+    );
     Map<String, Double> scores = new HashMap<>();
+
+    // Check if we're stuck (current position equals last position)
+    boolean isStuck = memory.isStuck(currentPos);
+    String lastDirection = memory.getLastRecommendedDirection();
 
     for (String direction : availableDirections) {
       // Base random factor
@@ -410,24 +493,36 @@ public class RandomMovement implements MovementStrategy {
         map
       );
 
-      // Safety score (existing obstacle avoidance)
+      // Safety score
       Point nextPos = calculateNextPosition(currentPos, direction);
       double safetyScore = evaluatePosition(nextPos, map);
 
+      // Direction penalty if stuck
+      double directionPenalty = 1.0;
+      if (isStuck && direction.equals(lastDirection)) {
+        directionPenalty = 0.2; // Heavy penalty for trying the same failed direction
+      }
+
       // Combine scores
       double finalScore =
-        (explorationScore * 0.4) + (safetyScore * 0.4) + (randomFactor * 0.2);
-
+        (
+          (explorationScore * 0.4) + (safetyScore * 0.4) + (randomFactor * 0.2)
+        ) *
+        directionPenalty;
       scores.put(direction, finalScore);
     }
 
     // Choose best direction
-    return scores
+    String chosenDirection = scores
       .entrySet()
       .stream()
       .max(Map.Entry.comparingByValue())
       .map(Map.Entry::getKey)
       .orElseGet(() -> getRandomDirection(availableDirections));
+
+    // Update memory with new move
+    memory.addMove(chosenDirection, currentPos);
+    return chosenDirection;
   }
 
   private double evaluatePosition(Point targetPos, LocalMap map) {
@@ -560,30 +655,30 @@ public class RandomMovement implements MovementStrategy {
       .orElseGet(() -> getRandomDirection(availableDirections));
   }
 
-  private void updateMovementMemory(
-    String agName,
-    Point currentPos,
-    String chosenDirection,
-    DirectionMemory memory,
-    EntropyMap entropyMap
-  ) {
-    try {
-      Point newPos = calculateNextPosition(currentPos, chosenDirection);
-      if (newPos != null) {
-        memory.addMove(chosenDirection);
-        entropyMap.updateHeat(newPos);
-        entropyMap.decayHeat();
-      }
-    } catch (Exception e) {
-      logger.warning(
-        String.format(
-          "Error updating movement memory for agent %s: %s",
-          agName,
-          e.getMessage()
-        )
-      );
-    }
-  }
+  // private void updateMovementMemory(
+  //   String agName,
+  //   Point currentPos,
+  //   String chosenDirection,
+  //   DirectionMemory memory,
+  //   EntropyMap entropyMap
+  // ) {
+  //   try {
+  //     Point newPos = calculateNextPosition(currentPos, chosenDirection);
+  //     if (newPos != null) {
+  //       memory.addMove(chosenDirection);
+  //       entropyMap.updateHeat(newPos);
+  //       entropyMap.decayHeat();
+  //     }
+  //   } catch (Exception e) {
+  //     logger.warning(
+  //       String.format(
+  //         "Error updating movement memory for agent %s: %s",
+  //         agName,
+  //         e.getMessage()
+  //       )
+  //     );
+  //   }
+  // }
 
   private List<String> getAvailableDirections(LocalMap map, Point currentPos) {
     List<String> directions = new ArrayList<>();
@@ -1016,52 +1111,6 @@ public class RandomMovement implements MovementStrategy {
     if (to.x > from.x) direction.append("e");
     if (to.x < from.x) direction.append("w");
     return direction.toString();
-  }
-
-  private String chooseDirection(
-    String agName,
-    LocalMap map,
-    List<String> availableDirections
-  ) {
-    Point currentPos = map.getCurrentPosition();
-    Point currentZone = getCurrentZone(currentPos);
-    AgentZoneMemory memory = agentZoneMemories.get(agName);
-
-    if (memory == null) {
-      memory = new AgentZoneMemory();
-      agentZoneMemories.put(agName, memory);
-    }
-
-    // Record current zone
-    memory.recordZone(currentZone);
-
-    // Calculate scores for each direction
-    String bestDirection = null;
-    double bestScore = Double.NEGATIVE_INFINITY;
-
-    for (String direction : availableDirections) {
-      Point nextPos = calculateNextPosition(currentPos, direction);
-
-      double explorationScore = calculateExplorationScore(nextPos, agName, map);
-      double safetyScore = calculateSafetyScore(nextPos, map);
-      double entropyScore = calculateEntropyScore(
-        direction,
-        memory.visitedZones
-      );
-
-      // Combined score with weights
-      double score =
-        (explorationScore * EXPLORATION_WEIGHT) +
-        (safetyScore * 0.3) +
-        (entropyScore * 0.3);
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestDirection = direction;
-      }
-    }
-
-    return bestDirection;
   }
 
   private double calculateEntropyScore(

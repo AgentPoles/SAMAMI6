@@ -54,18 +54,31 @@ public class ObstacleManager {
     String blockDirection,
     LocalMap map
   ) {
+    // Add debug logging
+    System.out.println(
+      "Validating move: " +
+      moveDirection +
+      " from " +
+      agentPos +
+      " with block: " +
+      blockDirection
+    );
+
     // Quick bounds check first
     Point nextPos = calculateNextPosition(agentPos, moveDirection);
     if (isPositionInvalid(nextPos, map)) {
+      System.out.println("Initial position check failed: " + nextPos);
       return false;
     }
 
     // Get agent positions using cached patterns
     Set<Point> nextAgentPositions = getAgentPositions(nextPos, agentSize);
+    Set<Point> currentAgentPositions = getAgentPositions(agentPos, agentSize);
 
-    // Check agent positions (using early return)
+    // Check agent positions
     for (Point pos : nextAgentPositions) {
       if (isPositionInvalid(pos, map)) {
+        System.out.println("Agent position invalid: " + pos);
         return false;
       }
     }
@@ -76,23 +89,30 @@ public class ObstacleManager {
     }
 
     // Check block positions
-    Set<Point> nextBlockPositions = getBlockPositions(
-      nextAgentPositions,
-      blockDirection
-    );
-    for (Point pos : nextBlockPositions) {
-      if (isPositionInvalid(pos, map)) {
-        return false;
-      }
-    }
-
-    // Only check path if we're moving with a block
-    Set<Point> currentAgentPositions = getAgentPositions(agentPos, agentSize);
     Set<Point> currentBlockPositions = getBlockPositions(
       currentAgentPositions,
       blockDirection
     );
+    Set<Point> nextBlockPositions = getBlockPositions(
+      nextAgentPositions,
+      blockDirection
+    );
 
+    // Add validation for block movement
+    for (Point pos : nextBlockPositions) {
+      if (isPositionInvalid(pos, map)) {
+        System.out.println("Block position invalid: " + pos);
+        return false;
+      }
+
+      // Additional check for block boundaries
+      if (Math.abs(pos.y) > Math.abs(agentPos.y) + agentSize + 1) {
+        System.out.println("Block movement exceeds reasonable bounds: " + pos);
+        return false;
+      }
+    }
+
+    // Verify the path is clear
     return !hasObstacleInPath(
       currentAgentPositions,
       nextAgentPositions,
@@ -106,7 +126,19 @@ public class ObstacleManager {
    * Check if position is invalid (obstacle or out of bounds)
    */
   private boolean isPositionInvalid(Point pos, LocalMap map) {
-    return map.hasObstacle(pos) || map.isOutOfBounds(pos);
+    boolean invalid = map.hasObstacle(pos) || map.isOutOfBounds(pos);
+    if (invalid) {
+      System.out.println(
+        "Position invalid: " +
+        pos +
+        " (obstacle: " +
+        map.hasObstacle(pos) +
+        ", outOfBounds: " +
+        map.isOutOfBounds(pos) +
+        ")"
+      );
+    }
+    return invalid;
   }
 
   /**

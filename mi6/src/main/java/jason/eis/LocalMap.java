@@ -68,6 +68,24 @@ public class LocalMap {
   // Add tracking maps
   private Point lastAttemptedMove = null;
 
+  private static class DirectionMemory {
+    private Point lastPosition;
+    private String lastRecommendedDirection;
+
+    void addMove(String direction, Point position) {
+      lastPosition = position;
+      lastRecommendedDirection = direction;
+    }
+
+    boolean isStuck(Point currentPos) {
+      return lastPosition != null && lastPosition.equals(currentPos);
+    }
+
+    String getLastRecommendedDirection() {
+      return lastRecommendedDirection;
+    }
+  }
+
   public enum EntityType {
     DISPENSER,
     BLOCK,
@@ -1175,45 +1193,27 @@ public class LocalMap {
       return true;
     }
 
+    // Check only relevant coordinate for each boundary direction
     Map<String, Point> boundaries = getConfirmedBoundariesPositions();
     if (!boundaries.isEmpty()) {
       for (Map.Entry<String, Point> entry : boundaries.entrySet()) {
         String direction = entry.getKey();
         Point boundaryPoint = entry.getValue();
 
-        boolean isBeyondBoundary = false;
-
-        // Only check relevant coordinate
+        // Only check relevant coordinate based on direction
         switch (direction) {
           case "n":
-            isBeyondBoundary = pos.y < boundaryPoint.y;
+            if (pos.y < boundaryPoint.y) return true;
             break;
           case "s":
-            isBeyondBoundary = pos.y > boundaryPoint.y;
+            if (pos.y > boundaryPoint.y) return true;
             break;
           case "e":
-            isBeyondBoundary = pos.x > boundaryPoint.x;
+            if (pos.x > boundaryPoint.x) return true;
             break;
           case "w":
-            isBeyondBoundary = pos.x < boundaryPoint.x;
+            if (pos.x < boundaryPoint.x) return true;
             break;
-        }
-
-        if (isBeyondBoundary) {
-          if (DEBUG) {
-            logger.info(
-              String.format(
-                "Position %s is beyond %s boundary at %s=%d",
-                pos,
-                direction,
-                direction.equals("n") || direction.equals("s") ? "y" : "x",
-                direction.equals("n") || direction.equals("s")
-                  ? boundaryPoint.y
-                  : boundaryPoint.x
-              )
-            );
-          }
-          return true;
         }
       }
     }
@@ -1371,39 +1371,51 @@ public class LocalMap {
       return;
     }
 
-    // Record boundary plane with only relevant coordinate
-    Point boundaryPoint;
-    switch (direction) {
-      case "n":
-        boundaryPoint = new Point(0, currentPos.y - 1); // Only y matters for north
-        break;
-      case "s":
-        boundaryPoint = new Point(0, currentPos.y + 1); // Only y matters for south
-        break;
-      case "e":
-        boundaryPoint = new Point(currentPos.x + 1, 0); // Only x matters for east
-        break;
-      case "w":
-        boundaryPoint = new Point(currentPos.x - 1, 0); // Only x matters for west
-        break;
-      default:
-        return;
-    }
+    // Get or create boundary evidence for this direction
+    BoundaryEvidence evidence = boundaryEvidence.computeIfAbsent(
+      direction,
+      k -> new BoundaryEvidence()
+    );
 
-    // Create BoundaryInfo object
-    BoundaryInfo boundaryInfo = new BoundaryInfo(boundaryPoint, direction);
-    confirmedBoundaries.put(direction, boundaryInfo);
+    // Add evidence for this failure
+    evidence.addFailedMove(currentPos);
 
-    if (DEBUG) {
-      logger.info(
-        String.format(
-          "Recorded boundary plane: %s at %s (relevant coordinate only)",
-          direction,
-          direction.equals("n") || direction.equals("s")
-            ? "y=" + boundaryPoint.y
-            : "x=" + boundaryPoint.x
-        )
-      );
+    // Only confirm boundary after 3 failures at the same plane
+    if (evidence.failedMoves >= 3) {
+      // Record boundary plane with only relevant coordinate
+      Point boundaryPoint;
+      switch (direction) {
+        case "n":
+          boundaryPoint = new Point(0, currentPos.y - 1); // Only y matters for north
+          break;
+        case "s":
+          boundaryPoint = new Point(0, currentPos.y + 1); // Only y matters for south
+          break;
+        case "e":
+          boundaryPoint = new Point(currentPos.x + 1, 0); // Only x matters for east
+          break;
+        case "w":
+          boundaryPoint = new Point(currentPos.x - 1, 0); // Only x matters for west
+          break;
+        default:
+          return;
+      }
+
+      // Create BoundaryInfo object
+      BoundaryInfo boundaryInfo = new BoundaryInfo(boundaryPoint, direction);
+      confirmedBoundaries.put(direction, boundaryInfo);
+
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "Recorded boundary plane: %s at %s (relevant coordinate only)",
+            direction,
+            direction.equals("n") || direction.equals("s")
+              ? "y=" + boundaryPoint.y
+              : "x=" + boundaryPoint.x
+          )
+        );
+      }
     }
   }
 
