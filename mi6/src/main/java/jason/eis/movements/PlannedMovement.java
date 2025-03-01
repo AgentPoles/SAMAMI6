@@ -101,6 +101,17 @@ public class PlannedMovement implements MovementStrategy {
     Point currentPos,
     Search.TargetType targetType
   ) {
+    // Default to size 1 and no block direction
+    return findNearestTarget(map, currentPos, targetType, 1, null);
+  }
+
+  public Point findNearestTarget(
+    LocalMap map,
+    Point currentPos,
+    Search.TargetType targetType,
+    int size,
+    String blockDirection
+  ) {
     if (map == null || currentPos == null || targetType == null) {
       logger.warning("Invalid parameters in findNearestTarget");
       return null;
@@ -126,14 +137,23 @@ public class PlannedMovement implements MovementStrategy {
       0,
       Math.min(MAX_TARGETS_TO_CHECK, targets.size())
     );
-    return findBestTarget(currentPos, nearestTargets, map, targetType);
+    return findBestTarget(
+      currentPos,
+      nearestTargets,
+      map,
+      targetType,
+      size,
+      blockDirection
+    );
   }
 
   private Point findBestTarget(
     Point currentPos,
     List<Point> targets,
     LocalMap map,
-    Search.TargetType targetType
+    Search.TargetType targetType,
+    int size,
+    String blockDirection
   ) {
     Point bestTarget = null;
     int minDistance = Integer.MAX_VALUE;
@@ -149,7 +169,9 @@ public class PlannedMovement implements MovementStrategy {
           currentPos,
           target,
           map,
-          targetType
+          targetType,
+          size,
+          blockDirection
         );
         if (path != null && path.success && path.points.size() < minDistance) {
           minDistance = path.points.size();
@@ -186,37 +208,88 @@ public class PlannedMovement implements MovementStrategy {
     int size,
     String blockDirection
   ) {
-    MovementState state = agentStates.get(agName);
-    if (state == null || map == null) return null;
-
-    Point currentPos = map.getCurrentPosition();
-    if (currentPos == null) return null;
-
-    // Get or calculate the planned move
-    String plannedMove = getPlannedMove(state, currentPos, map);
-    if (plannedMove == null) return null;
-
-    // Convert planned move direction to target Point
-    Point targetPos = calculateNextPosition(currentPos, plannedMove);
-
-    // Let collision handler handle both dynamic obstacles and boundaries
-    String resolvedMove = collisionHandler.resolveCollision(
-      agName,
-      currentPos,
-      targetPos,
-      map,
-      false
-    );
-
-    if (resolvedMove != null) {
-      if (!resolvedMove.equals(plannedMove)) {
-        handleDeviation(state);
-      } else {
-        state.currentPathIndex++;
+    try {
+      // Validate inputs
+      if (agName == null || map == null) {
+        logger.warning(
+          String.format(
+            "Invalid parameters in getNextDirection: agent=%s, map=%s",
+            agName,
+            map != null ? "valid" : "null"
+          )
+        );
+        return null;
       }
-    }
 
-    return resolvedMove;
+      MovementState state = agentStates.get(agName);
+      if (state == null) {
+        if (DEBUG) logger.info("No movement state for agent: " + agName);
+        return null;
+      }
+
+      Point currentPos = map.getCurrentPosition();
+      if (currentPos == null) {
+        logger.warning("Current position is null for agent: " + agName);
+        return null;
+      }
+
+      // Get or calculate the planned move
+      String plannedMove = getPlannedMove(
+        state,
+        currentPos,
+        map,
+        size,
+        blockDirection
+      );
+      if (plannedMove == null) {
+        if (DEBUG) logger.info(
+          "No planned move available for agent: " + agName
+        );
+        return null;
+      }
+
+      // Convert planned move direction to target Point
+      Point targetPos = calculateNextPosition(currentPos, plannedMove);
+      if (targetPos == null) {
+        logger.warning(
+          "Failed to calculate target position for move: " + plannedMove
+        );
+        return null;
+      }
+
+      // Handle collision avoidance
+      String resolvedMove = collisionHandler.resolveCollision(
+        agName,
+        currentPos,
+        targetPos,
+        map,
+        false
+      );
+
+      if (resolvedMove != null) {
+        if (!resolvedMove.equals(plannedMove)) {
+          if (DEBUG) {
+            logger.info(
+              String.format(
+                "Move changed from %s to %s due to collision avoidance",
+                plannedMove,
+                resolvedMove
+              )
+            );
+          }
+          handleDeviation(state);
+        } else {
+          state.currentPathIndex++;
+        }
+      } else {
+        logger.warning("Collision handler returned null move");
+      }
+
+      return resolvedMove;
+    } catch (Exception e) {
+      logger.severe("Error in getNextDirection: " + e.getMessage());
+      return null;
+    }
   }
 
   public void setTarget(String agName, Point target, Search.TargetType type) {
@@ -324,12 +397,19 @@ public class PlannedMovement implements MovementStrategy {
     LocalMap map,
     Point start,
     Point goal,
-    Search.TargetType targetType
+    Search.TargetType targetType,
+    int size,
+    String blockDirection
   ) {
-    return search.findPath(start, goal, map, targetType);
+    return search.findPath(start, goal, map, targetType, size, blockDirection);
   }
 
-  public Search.PathResult getFullPathResult(String agName, LocalMap map) {
+  public Search.PathResult getFullPathResult(
+    String agName,
+    LocalMap map,
+    int size,
+    String blockDirection
+  ) {
     MovementState state = agentStates.get(agName);
     if (state == null || state.targetPosition == null) {
       return new Search.PathResult(new ArrayList<>(), new ArrayList<>(), false);
@@ -339,32 +419,110 @@ public class PlannedMovement implements MovementStrategy {
       map.getCurrentPosition(),
       state.targetPosition,
       map,
-      state.targetType
+      state.targetType,
+      size,
+      blockDirection
     );
   }
 
   private String getPlannedMove(
     MovementState state,
     Point currentPos,
-    LocalMap map
+    LocalMap map,
+    int size,
+    String blockDirection
   ) {
-    // Recalculate path if needed
-    if (state.needsNewPath()) {
-      Search.PathResult path = search.findPath(
-        currentPos,
-        state.targetPosition,
-        map,
-        state.targetType
-      );
-
-      if (path != null && path.success) {
-        state.setNewPath(path.directions);
-      } else {
+    try {
+      // Validate inputs
+      if (state == null || currentPos == null || map == null) {
+        logger.warning(
+          String.format(
+            "Invalid parameters in getPlannedMove: state=%s, pos=%s, map=%s",
+            state != null ? "valid" : "null",
+            currentPos,
+            map != null ? "valid" : "null"
+          )
+        );
         return null;
       }
-    }
 
-    return state.getCurrentStep();
+      // Validate target still exists
+      if (!isTargetStillValid(state, map)) {
+        logger.info(
+          String.format(
+            "Target no longer valid: %s of type %s",
+            state.targetPosition,
+            state.targetType
+          )
+        );
+        state.plannedPath.clear();
+        return null;
+      }
+
+      // Recalculate path if needed
+      if (state.needsNewPath()) {
+        if (DEBUG) {
+          logger.info(
+            String.format(
+              "Recalculating path to %s (type: %s) from %s",
+              state.targetPosition,
+              state.targetType,
+              currentPos
+            )
+          );
+        }
+
+        Search.PathResult path = search.findPath(
+          currentPos,
+          state.targetPosition,
+          map,
+          state.targetType,
+          size,
+          blockDirection
+        );
+
+        if (path != null && path.success) {
+          if (path.directions.isEmpty()) {
+            logger.warning("Path found but no directions provided");
+            return null;
+          }
+          state.setNewPath(path.directions);
+        } else {
+          logger.warning(
+            String.format(
+              "Failed to find path to target %s from %s",
+              state.targetPosition,
+              currentPos
+            )
+          );
+          return null;
+        }
+      }
+
+      String nextMove = state.getCurrentStep();
+      if (nextMove == null) {
+        logger.warning("No next move available in current path");
+        state.plannedPath.clear(); // Force recalculation next time
+      }
+      return nextMove;
+    } catch (Exception e) {
+      logger.severe("Error in getPlannedMove: " + e.getMessage());
+      return null;
+    }
+  }
+
+  private boolean isTargetStillValid(MovementState state, LocalMap map) {
+    try {
+      if (state.targetType == null || state.targetPosition == null) {
+        return false;
+      }
+
+      List<Point> targets = getTargetsOfType(map, state.targetType);
+      return targets.contains(state.targetPosition);
+    } catch (Exception e) {
+      logger.warning("Error checking target validity: " + e.getMessage());
+      return false;
+    }
   }
 
   private void handleDeviation(MovementState state) {

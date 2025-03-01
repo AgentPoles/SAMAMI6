@@ -3,12 +3,16 @@ package jason.eis.movements;
 import jason.eis.LocalMap;
 import jason.eis.Point;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 public class Search {
   private static final Logger logger = Logger.getLogger(Search.class.getName());
   private static final boolean DEBUG = true;
-  private static final int MAX_ITERATIONS = 10000; // Prevent infinite loops
+  private static final int MAX_ITERATIONS = 1000; // Reduced from previous value
+  private static final int MAX_PATH_LENGTH = 100; // Maximum acceptable path length
+  private static final double HEURISTIC_WEIGHT = 1.2; // Slightly favor exploration
+  private static final int DYNAMIC_OBSTACLE_BUFFER = 2; // Buffer zone around dynamic obstacles
   private static final double MAX_PATH_COST = 1000.0; // Maximum reasonable path cost
 
   // Search types
@@ -39,20 +43,22 @@ public class Search {
   private static class JumpPoint {
     Point position;
     JumpPoint parent;
-    double gCost; // Cost from start
-    double hCost; // Estimated cost to goal
-    String direction; // Direction taken to reach this point
+    double gCost;
+    double fCost;
+    String direction;
 
-    JumpPoint(Point pos, JumpPoint parent, double g, double h, String dir) {
-      this.position = pos;
+    JumpPoint(
+      Point position,
+      JumpPoint parent,
+      double gCost,
+      double hCost,
+      String direction
+    ) {
+      this.position = position;
       this.parent = parent;
-      this.gCost = g;
-      this.hCost = h;
-      this.direction = dir;
-    }
-
-    double fCost() {
-      return gCost + hCost;
+      this.gCost = gCost;
+      this.fCost = gCost + hCost;
+      this.direction = direction;
     }
   }
 
@@ -68,64 +74,120 @@ public class Search {
     }
   }
 
+  private final ObstacleManager obstacleManager;
+
+  // Cache recently calculated paths
+  private final Map<PathKey, CachedPath> pathCache = new ConcurrentHashMap<>();
+  private static final int CACHE_TTL = 5000; // 5 seconds cache lifetime
+  private static final int MAX_CACHE_SIZE = 100;
+
+  private static class PathKey {
+    final Point start;
+    final Point target;
+    final int size;
+    final String blockDir;
+
+    PathKey(Point start, Point target, int size, String blockDir) {
+      this.start = start;
+      this.target = target;
+      this.size = size;
+      this.blockDir = blockDir;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (!(o instanceof PathKey)) return false;
+      PathKey key = (PathKey) o;
+      return (
+        size == key.size &&
+        Objects.equals(start, key.start) &&
+        Objects.equals(target, key.target) &&
+        Objects.equals(blockDir, key.blockDir)
+      );
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(start, target, size, blockDir);
+    }
+  }
+
+  private static class CachedPath {
+    final PathResult result;
+    final long timestamp;
+
+    CachedPath(PathResult result) {
+      this.result = result;
+      this.timestamp = System.currentTimeMillis();
+    }
+
+    boolean isValid() {
+      return System.currentTimeMillis() - timestamp < CACHE_TTL;
+    }
+  }
+
+  public Search() {
+    this.obstacleManager = new ObstacleManager();
+  }
+
   public PathResult findPath(
     Point start,
     Point target,
     LocalMap map,
-    TargetType targetType
+    TargetType targetType,
+    int agentSize,
+    String blockDirection
   ) {
     try {
-      // Validate input parameters
-      if (!validateInputs(start, target, map, targetType)) {
+      // Check cache first
+      PathKey key = new PathKey(start, target, agentSize, blockDirection);
+      CachedPath cached = pathCache.get(key);
+      if (cached != null && cached.isValid()) {
+        return cached.result;
+      }
+
+      // Validate inputs
+      if (!validateInputs(start, target, map, targetType, agentSize)) {
         return createEmptyPathResult("Invalid input parameters");
       }
 
-      // Priority queue ordered by f-cost (g + h)
-      PriorityQueue<JumpPoint> openSet = new PriorityQueue<>(
-        Comparator.comparingDouble(JumpPoint::fCost)
+      // Quick reachability check
+      if (!isTargetReachable(target, map, agentSize, blockDirection)) {
+        return createEmptyPathResult("Target unreachable");
+      }
+
+      // Use simplified A* for distant targets
+      int manhattanDistance =
+        Math.abs(target.x - start.x) + Math.abs(target.y - start.y);
+      if (manhattanDistance > MAX_PATH_LENGTH) {
+        return findApproximatePath(
+          start,
+          target,
+          map,
+          agentSize,
+          blockDirection
+        );
+      }
+
+      // Standard A* with optimizations
+      PathResult result = findOptimizedPath(
+        start,
+        target,
+        map,
+        agentSize,
+        blockDirection
       );
 
-      // Track visited nodes and their best g-costs
-      Map<Point, Double> gScores = new HashMap<>();
-      Set<Point> closedSet = new HashSet<>();
-
-      // Initialize start point
-      JumpPoint startPoint = createStartPoint(start, target);
-      openSet.add(startPoint);
-      gScores.put(start, 0.0);
-
-      int iterations = 0;
-      while (!openSet.isEmpty() && iterations < MAX_ITERATIONS) {
-        iterations++;
-        JumpPoint current = openSet.poll();
-
-        if (current == null) {
-          return createEmptyPathResult("Null current point in pathfinding");
-        }
-
-        // Found target
-        if (isAtTarget(current.position, target, targetType)) {
-          return reconstructPath(current);
-        }
-
-        closedSet.add(current.position);
-
-        try {
-          processNeighbors(current, target, map, openSet, gScores, closedSet);
-        } catch (Exception e) {
-          logger.warning("Error processing neighbors: " + e.getMessage());
-          continue;
-        }
+      // Cache the result
+      if (result.success) {
+        cacheResult(key, result);
       }
 
-      if (iterations >= MAX_ITERATIONS) {
-        logger.warning("Pathfinding exceeded maximum iterations");
-      }
-
-      return createEmptyPathResult("No path found");
+      return result;
     } catch (Exception e) {
-      logger.severe("Critical error in pathfinding: " + e.getMessage());
-      return createEmptyPathResult("Pathfinding failed");
+      logger.severe("Error in pathfinding: " + e.getMessage());
+      return createEmptyPathResult("Pathfinding error");
     }
   }
 
@@ -133,7 +195,8 @@ public class Search {
     Point start,
     Point target,
     LocalMap map,
-    TargetType targetType
+    TargetType targetType,
+    int agentSize
   ) {
     if (start == null || target == null || map == null || targetType == null) {
       logger.warning(
@@ -148,67 +211,237 @@ public class Search {
       return false;
     }
 
-    if (!isWalkable(start, map)) {
-      logger.warning("Start position is not walkable: " + start);
+    if (agentSize <= 0) {
+      logger.warning("Invalid agent size: " + agentSize);
+      return false;
+    }
+
+    // Check if target is forbidden (boundary or obstacle)
+    if (map.isForbidden(target)) {
+      if (DEBUG) {
+        logger.warning(
+          String.format(
+            "Target position %s is forbidden (boundary or obstacle)",
+            target
+          )
+        );
+      }
+      return false;
+    }
+
+    // Check if start position has obstacles
+    if (map.hasObstacle(start)) {
+      logger.warning(
+        String.format("Start position %s contains an obstacle", start)
+      );
       return false;
     }
 
     return true;
   }
 
-  private void processNeighbors(
-    JumpPoint current,
+  private boolean isTargetReachable(
     Point target,
     LocalMap map,
-    PriorityQueue<JumpPoint> openSet,
-    Map<Point, Double> gScores,
-    Set<Point> closedSet
+    int agentSize,
+    String blockDirection
   ) {
-    for (String direction : DIRECTIONS) {
-      try {
-        Point nextPos = applyDirection(current.position, direction);
-        if (
-          nextPos == null ||
-          !isWalkable(nextPos, map) ||
-          closedSet.contains(nextPos)
-        ) {
-          continue;
+    try {
+      // Check if target has static obstacles
+      if (map.isStaticObstacle(target)) {
+        if (DEBUG) {
+          logger.info("Target position has static obstacle: " + target);
         }
-
-        double newG = current.gCost + 1.0;
-        if (newG > MAX_PATH_COST) {
-          continue; // Path too long, skip
-        }
-
-        if (!gScores.containsKey(nextPos) || newG < gScores.get(nextPos)) {
-          gScores.put(nextPos, newG);
-          double h = heuristic(nextPos, target);
-          JumpPoint neighbor = new JumpPoint(
-            nextPos,
-            current,
-            newG,
-            h,
-            direction
-          );
-          openSet.add(neighbor);
-        }
-      } catch (Exception e) {
-        logger.warning(
-          "Error processing direction " + direction + ": " + e.getMessage()
-        );
+        return false;
       }
+
+      // Check if target is near boundary
+      if (map.isNearBoundary(target)) {
+        if (DEBUG) {
+          logger.info("Target is too close to boundary: " + target);
+        }
+        return false;
+      }
+
+      // Check surrounding area for obstacles
+      Set<Point> nearbyObstacles = map.getObstaclesInRange(target, agentSize);
+      if (!nearbyObstacles.isEmpty()) {
+        if (DEBUG) {
+          logger.info("Obstacles found near target: " + nearbyObstacles);
+        }
+        return false;
+      }
+
+      return true;
+    } catch (Exception e) {
+      logger.warning("Error checking target reachability: " + e.getMessage());
+      return false;
     }
   }
 
-  private boolean isWalkable(Point pos, LocalMap map) {
-    try {
-      return !map.hasObstacle(pos) && !map.isOutOfBounds(pos);
-    } catch (Exception e) {
-      logger.warning(
-        "Error checking walkable position " + pos + ": " + e.getMessage()
-      );
-      return false;
+  private PathResult findOptimizedPath(
+    Point start,
+    Point target,
+    LocalMap map,
+    int agentSize,
+    String blockDirection
+  ) {
+    PriorityQueue<JumpPoint> openSet = new PriorityQueue<>(
+      Comparator.comparingDouble(p -> p.fCost)
+    );
+    Map<Point, JumpPoint> visited = new HashMap<>();
+
+    // Initial point
+    JumpPoint startPoint = new JumpPoint(
+      start,
+      null,
+      0,
+      getHeuristic(start, target),
+      null
+    );
+    openSet.add(startPoint);
+    visited.put(start, startPoint);
+
+    while (!openSet.isEmpty()) {
+      JumpPoint current = openSet.poll();
+
+      if (isCloseEnough(current.position, target, agentSize)) {
+        return reconstructPath(current, map, agentSize, blockDirection);
+      }
+
+      for (String dir : DIRECTIONS) {
+        Point neighbor = getNeighbor(current.position, dir);
+        if (neighbor == null || map.isForbidden(neighbor)) {
+          continue;
+        }
+
+        double tentativeG =
+          current.gCost + getMovementCost(current.position, neighbor, map);
+        JumpPoint neighborPoint = visited.get(neighbor);
+
+        if (neighborPoint == null || tentativeG < neighborPoint.gCost) {
+          double h = getHeuristic(neighbor, target);
+          neighborPoint = new JumpPoint(neighbor, current, tentativeG, h, dir);
+          visited.put(neighbor, neighborPoint);
+          openSet.add(neighborPoint);
+        }
+      }
     }
+
+    return createEmptyPathResult("No path found");
+  }
+
+  private PathResult findApproximatePath(
+    Point start,
+    Point target,
+    LocalMap map,
+    int agentSize,
+    String blockDirection
+  ) {
+    // For distant targets, use a simplified approach with waypoints
+    List<Point> waypoints = new ArrayList<>();
+    Point current = start;
+
+    while (getManhattanDistance(current, target) > MAX_PATH_LENGTH / 2) {
+      // Find an intermediate point in the general direction
+      Point intermediate = findIntermediatePoint(
+        current,
+        target,
+        map,
+        agentSize
+      );
+      if (intermediate == null) {
+        return createEmptyPathResult("No valid intermediate point found");
+      }
+      waypoints.add(intermediate);
+      current = intermediate;
+    }
+
+    // Add final target
+    waypoints.add(target);
+
+    return createWaypointPath(start, waypoints, map, agentSize, blockDirection);
+  }
+
+  private Point findIntermediatePoint(
+    Point start,
+    Point target,
+    LocalMap map,
+    int agentSize
+  ) {
+    int dx = target.x - start.x;
+    int dy = target.y - start.y;
+    int step = MAX_PATH_LENGTH / 2;
+
+    // Try points in the general direction
+    Point[] candidates = {
+      new Point(start.x + (dx > 0 ? step : -step), start.y),
+      new Point(start.x, start.y + (dy > 0 ? step : -step)),
+      new Point(
+        start.x + (dx > 0 ? step / 2 : -step / 2),
+        start.y + (dy > 0 ? step / 2 : -step / 2)
+      ),
+    };
+
+    for (Point candidate : candidates) {
+      if (
+        !map.isForbidden(candidate) && !isNearDynamicObstacles(candidate, map)
+      ) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  private boolean isNearDynamicObstacles(Point pos, LocalMap map) {
+    Map<Point, LocalMap.ObstacleInfo> dynamicObstacles = map.getDynamicObstacles();
+    for (Point obstacle : dynamicObstacles.keySet()) {
+      if (getManhattanDistance(pos, obstacle) < DYNAMIC_OBSTACLE_BUFFER) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private void cacheResult(PathKey key, PathResult result) {
+    // Remove old entries if cache is too large
+    if (pathCache.size() >= MAX_CACHE_SIZE) {
+      pathCache.entrySet().removeIf(entry -> !entry.getValue().isValid());
+      if (pathCache.size() >= MAX_CACHE_SIZE) {
+        // If still too large, remove oldest entries
+        List<Map.Entry<PathKey, CachedPath>> entries = new ArrayList<>(
+          pathCache.entrySet()
+        );
+        entries.sort(
+          (a, b) -> Long.compare(a.getValue().timestamp, b.getValue().timestamp)
+        );
+        for (int i = 0; i < entries.size() / 2; i++) {
+          pathCache.remove(entries.get(i).getKey());
+        }
+      }
+    }
+    pathCache.put(key, new CachedPath(result));
+  }
+
+  private boolean isCloseEnough(Point current, Point target, int agentSize) {
+    return getManhattanDistance(current, target) <= Math.max(1, agentSize - 1);
+  }
+
+  private double getMovementCost(Point from, Point to, LocalMap map) {
+    double baseCost = 1.0;
+
+    // Increase cost near dynamic obstacles
+    if (isNearDynamicObstacles(to, map)) {
+      baseCost *= 2.0;
+    }
+
+    // Increase cost near boundaries
+    if (map.isNearBoundary(to)) {
+      baseCost *= 1.5;
+    }
+
+    return baseCost;
   }
 
   private double heuristic(Point a, Point b) {
@@ -234,24 +467,25 @@ public class Search {
     }
   }
 
-  private PathResult reconstructPath(JumpPoint end) {
-    try {
-      List<String> directions = new ArrayList<>();
-      List<Point> points = new ArrayList<>();
+  private PathResult reconstructPath(
+    JumpPoint endPoint,
+    LocalMap map,
+    int agentSize,
+    String blockDirection
+  ) {
+    List<Point> points = new ArrayList<>();
+    List<String> directions = new ArrayList<>();
+    JumpPoint current = endPoint;
 
-      JumpPoint current = end;
-      while (current.parent != null) {
+    while (current != null) {
+      points.add(0, current.position);
+      if (current.direction != null) {
         directions.add(0, current.direction);
-        points.add(0, current.position);
-        current = current.parent;
       }
-      points.add(0, current.position); // Add start position
-
-      return new PathResult(directions, points, true);
-    } catch (Exception e) {
-      logger.severe("Error reconstructing path: " + e.getMessage());
-      return createEmptyPathResult("Path reconstruction failed");
+      current = current.parent;
     }
+
+    return new PathResult(directions, points, true);
   }
 
   private PathResult createEmptyPathResult(String reason) {
@@ -272,5 +506,95 @@ public class Search {
       logger.warning("Error checking target: " + e.getMessage());
       return false;
     }
+  }
+
+  private double getHeuristic(Point start, Point target) {
+    return heuristic(start, target);
+  }
+
+  private List<Point> getValidNeighbors(
+    Point current,
+    LocalMap map,
+    int agentSize,
+    String blockDirection,
+    Point target
+  ) {
+    List<Point> neighbors = new ArrayList<>();
+    for (String direction : DIRECTIONS) {
+      Point nextPos = applyDirection(current, direction);
+      if (
+        nextPos != null && !isWalkable(nextPos, map, agentSize, blockDirection)
+      ) {
+        neighbors.add(nextPos);
+      }
+    }
+    return neighbors;
+  }
+
+  private boolean isWalkable(
+    Point pos,
+    LocalMap map,
+    int agentSize,
+    String blockDirection
+  ) {
+    try {
+      return (
+        obstacleManager
+          .filterDirections(
+            Arrays.asList(DIRECTIONS),
+            map,
+            pos,
+            agentSize,
+            blockDirection
+          )
+          .size() >
+        0
+      );
+    } catch (Exception e) {
+      logger.warning(
+        "Error checking walkable position " + pos + ": " + e.getMessage()
+      );
+      return false;
+    }
+  }
+
+  private double getManhattanDistance(Point a, Point b) {
+    return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+  }
+
+  private PathResult createWaypointPath(
+    Point start,
+    List<Point> waypoints,
+    LocalMap map,
+    int agentSize,
+    String blockDirection
+  ) {
+    List<String> directions = new ArrayList<>();
+    List<Point> points = new ArrayList<>();
+
+    Point current = start;
+    for (Point waypoint : waypoints) {
+      PathResult path = findPath(
+        current,
+        waypoint,
+        map,
+        TargetType.BLOCK,
+        agentSize,
+        blockDirection
+      );
+      if (!path.success) {
+        return createEmptyPathResult("Path to waypoint failed");
+      }
+      directions.addAll(path.directions);
+      points.addAll(path.points);
+      current = waypoint;
+    }
+
+    return new PathResult(directions, points, true);
+  }
+
+  private Point getNeighbor(Point pos, String direction) {
+    Point nextPos = applyDirection(pos, direction);
+    return nextPos;
   }
 }

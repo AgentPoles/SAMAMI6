@@ -1,5 +1,16 @@
 // Combined action result handling with parameters
+/* Plans */
++goal(X,Y)[source(percept)] : true <-
+    helpermodels.AddGoal(X, Y).
 
++obstacle(X,Y)[source(percept)] : true <-
+    helpermodels.AddObstacle(X, Y).
+
++thing(X,Y,dispenser,Detail)[source(percept)] : true <-
+    helpermodels.AddDispenser(X, Y, Detail).
+
++thing(X,Y,entity,_)[source(percept)] : true <-
+    helpermodels.AddOtherAgents(X, Y).
 
 // Debug all action results with more detail
 +lastActionResult(R)[source(percept)] : lastActionParams([Dir])[source(percept)] <-

@@ -98,14 +98,14 @@ public class RequestGuidance extends DefaultInternalAction {
       }
       final int size = (int) ((NumberTerm) terms[1]).solve();
 
-      // Get block direction
-      String blockDirection = null;
-      if (terms[2] instanceof Atom) {
-        String dir = ((Atom) terms[2]).getFunctor();
-        if (!dir.equals("null")) {
-          blockDirection = dir;
-        }
-      }
+      // Make blockDirection final
+      final String blockDirection = terms[2] instanceof Atom
+        ? (
+          ((Atom) terms[2]).getFunctor().equals("null")
+            ? null
+            : ((Atom) terms[2]).getFunctor()
+        )
+        : null;
 
       // Get current position and map with null checks
       final LocalMap agentMap = model.getAgentMap(agName);
@@ -153,27 +153,27 @@ public class RequestGuidance extends DefaultInternalAction {
         CompletableFuture<Search.PathResult> pathFuture = CompletableFuture.supplyAsync(
           () -> {
             try {
-              // Convert target type safely
               Search.TargetType targetType = convertTargetType(
                 targetTypeStr,
                 agName
               );
-
-              // Find nearest target
               Point target = plannedMovement.findNearestTarget(
                 agentMap,
                 currentPos,
-                targetType
+                targetType,
+                size,
+                blockDirection
               );
 
               if (target == null) return null;
 
-              // Calculate path to target
               return plannedMovement.calculatePath(
                 agentMap,
                 currentPos,
                 target,
-                targetType
+                targetType,
+                size,
+                blockDirection
               );
             } catch (Exception e) {
               logger.warning(
