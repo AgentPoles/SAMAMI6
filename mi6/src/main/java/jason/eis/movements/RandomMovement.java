@@ -108,6 +108,7 @@ public class RandomMovement implements MovementStrategy {
   private static final int AGENT_AWARENESS_DISTANCE = 3; // Awareness radius
 
   private final Exploration exploration = new Exploration();
+  private final ObstacleManager obstacleManager = new ObstacleManager();
 
   private class DirectionMemory {
     private final Deque<String> lastMoves = new ArrayDeque<>(MEMORY_SIZE);
@@ -286,17 +287,24 @@ public class RandomMovement implements MovementStrategy {
     }
   }
 
-  // This is the method called by RequestGuidance
-  public String getNextDirection(String agName, LocalMap map) {
+  @Override
+  public String getNextMove(String agName, LocalMap map) {
+    // Call getNextDirection with default size 1 and no block
+    return getNextDirection(agName, map, 1, null);
+  }
+
+  @Override
+  public String getNextDirection(
+    String agName,
+    LocalMap map,
+    int size,
+    String blockDirection
+  ) {
     if (map == null) {
       logger.warning("Map is null for agent " + agName);
       return "e"; // Default direction
     }
-    return getNextMove(agName, map);
-  }
 
-  @Override
-  public String getNextMove(String agName, LocalMap map) {
     Point currentPos = map.getCurrentPosition();
     if (currentPos == null) return null;
 
@@ -312,7 +320,6 @@ public class RandomMovement implements MovementStrategy {
       map.logBoundaryState();
     }
 
-    // Get available directions (filtering out static obstacles and boundaries)
     List<String> availableDirections = Arrays
       .asList("n", "s", "e", "w")
       .stream()
@@ -336,6 +343,16 @@ public class RandomMovement implements MovementStrategy {
         }
       )
       .collect(Collectors.toList());
+
+    // Filter directions considering size and block
+    availableDirections =
+      obstacleManager.filterDirections(
+        availableDirections,
+        map,
+        currentPos,
+        size,
+        blockDirection
+      );
 
     if (DEBUG) {
       logger.info(
@@ -373,15 +390,6 @@ public class RandomMovement implements MovementStrategy {
     return chosenDirection;
   }
 
-  // Add method to record failed moves (called from ASL)
-  public void recordFailedMove(String agName, String attemptedDirection) {
-    Point currentPos = MI6Model
-      .getInstance()
-      .getAgentMap(agName)
-      .getCurrentPosition();
-    collisionHandler.recordFailedMove(agName, currentPos, attemptedDirection);
-  }
-
   private String chooseDirection(
     Point currentPos,
     List<String> availableDirections,
@@ -414,17 +422,12 @@ public class RandomMovement implements MovementStrategy {
     }
 
     // Choose best direction
-    String chosen = scores
+    return scores
       .entrySet()
       .stream()
       .max(Map.Entry.comparingByValue())
       .map(Map.Entry::getKey)
       .orElseGet(() -> getRandomDirection(availableDirections));
-
-    // Record the visit after choosing direction
-    exploration.recordVisit(agName, currentPos);
-
-    return chosen;
   }
 
   private double evaluatePosition(Point targetPos, LocalMap map) {

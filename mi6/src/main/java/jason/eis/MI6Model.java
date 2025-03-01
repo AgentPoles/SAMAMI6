@@ -867,9 +867,8 @@ public class MI6Model {
   }
 
   public boolean moveToNearestDispenser(String agName) {
-    String nextMove = plannedMovement.getNextMove(agName);
+    String nextMove = plannedMovement.getNextMove(agName, getAgentMap(agName));
     if (nextMove == null) return false;
-
     try {
       boolean success = moveTowards(agName, nextMove);
       if (success) {

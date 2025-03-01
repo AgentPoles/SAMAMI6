@@ -58,12 +58,16 @@ public class RequestGuidance extends DefaultInternalAction {
 
   private static final Map<String, PathState> agentPaths = new ConcurrentHashMap<>();
 
+  private Term[] terms; // Add this field at class level
+
   @Override
   public Object execute(TransitionSystem ts, Unifier un, Term[] terms)
     throws Exception {
     final String agName = ts.getUserAgArch().getAgName();
-    final Term outputTerm = terms[terms.length - 1];
     final AtomicReference<Search.TargetType> targetTypeRef = new AtomicReference<>();
+
+    // Store terms as class field for use in handleRandomMovement
+    this.terms = terms;
 
     try {
       MI6Model model = MI6Model.getInstance();
@@ -72,46 +76,61 @@ public class RequestGuidance extends DefaultInternalAction {
         String.format("[%s] Starting RequestGuidance execution", agName)
       );
 
-      // Validate input parameters
-      if (terms == null || terms.length < 2) {
-        throw new IllegalArgumentException("Invalid number of parameters");
+      // Validate input parameters (target, size, blockDir, outputDir)
+      if (terms == null || terms.length != 4) {
+        throw new IllegalArgumentException(
+          "Expected 4 parameters: target, size, blockDir, outputDir"
+        );
       }
 
       // Parse parameters with validation
       if (!(terms[0] instanceof Atom)) {
-        throw new IllegalArgumentException("First parameter must be an Atom");
+        throw new IllegalArgumentException(
+          "First parameter (target) must be an Atom"
+        );
       }
       final String targetTypeStr = ((Atom) terms[0]).getFunctor().toUpperCase();
 
       if (!(terms[1] instanceof NumberTerm)) {
-        throw new IllegalArgumentException("Second parameter must be a Number");
+        throw new IllegalArgumentException(
+          "Second parameter (size) must be a Number"
+        );
       }
       final int size = (int) ((NumberTerm) terms[1]).solve();
+
+      // Get block direction
+      String blockDirection = null;
+      if (terms[2] instanceof Atom) {
+        String dir = ((Atom) terms[2]).getFunctor();
+        if (!dir.equals("null")) {
+          blockDirection = dir;
+        }
+      }
+
+      // Get current position and map with null checks
+      final LocalMap agentMap = model.getAgentMap(agName);
+      if (agentMap == null) {
+        logger.warning(String.format("[%s] Agent map is null", agName));
+        return handleRandomMovement(agName, un, terms[3]);
+      }
+
+      final Point currentPos = agentMap.getCurrentPosition();
+      if (currentPos == null) {
+        logger.warning(String.format("[%s] Current position is null", agName));
+        return handleRandomMovement(agName, un, terms[3]);
+      }
+
+      final PlannedMovement plannedMovement = model.getPlannedMovement();
+      if (plannedMovement == null) {
+        logger.warning(String.format("[%s] Planned movement is null", agName));
+        return handleRandomMovement(agName, un, terms[3]);
+      }
 
       // Get or create path state with null check
       PathState pathState = agentPaths.computeIfAbsent(
         agName,
         k -> new PathState()
       );
-
-      // Get current position and map with null checks
-      final LocalMap agentMap = model.getAgentMap(agName);
-      if (agentMap == null) {
-        logger.warning(String.format("[%s] Agent map is null", agName));
-        return handleRandomMovement(agName, un, outputTerm);
-      }
-
-      final Point currentPos = agentMap.getCurrentPosition();
-      if (currentPos == null) {
-        logger.warning(String.format("[%s] Current position is null", agName));
-        return handleRandomMovement(agName, un, outputTerm);
-      }
-
-      final PlannedMovement plannedMovement = model.getPlannedMovement();
-      if (plannedMovement == null) {
-        logger.warning(String.format("[%s] Planned movement is null", agName));
-        return handleRandomMovement(agName, un, outputTerm);
-      }
 
       // Check cooldown period
       if (!pathState.canRetryPathfinding()) {
@@ -127,7 +146,7 @@ public class RequestGuidance extends DefaultInternalAction {
             )
           );
         }
-        return handleRandomMovement(agName, un, outputTerm);
+        return handleRandomMovement(agName, un, terms[3]);
       }
 
       try {
@@ -139,7 +158,6 @@ public class RequestGuidance extends DefaultInternalAction {
                 targetTypeStr,
                 agName
               );
-              targetTypeRef.set(targetType);
 
               // Find nearest target
               Point target = plannedMovement.findNearestTarget(
@@ -201,7 +219,7 @@ public class RequestGuidance extends DefaultInternalAction {
 
           String nextDirection = pathResult.directions.get(0);
           pathState.currentPath.remove(0);
-          return returnSingleDirection(nextDirection, un, outputTerm);
+          return returnSingleDirection(nextDirection, un, terms[3]);
         }
       } catch (TimeoutException e) {
         logger.warning(
@@ -222,7 +240,7 @@ public class RequestGuidance extends DefaultInternalAction {
       if (DEBUG) logger.info(
         String.format("[%s] Falling back to random movement", agName)
       );
-      return handleRandomMovement(agName, un, outputTerm);
+      return handleRandomMovement(agName, un, terms[3]);
     } catch (Exception e) {
       logger.severe(
         String.format(
@@ -232,7 +250,7 @@ public class RequestGuidance extends DefaultInternalAction {
         )
       );
       // Always ensure we return a valid movement
-      return handleRandomMovement(agName, un, outputTerm);
+      return handleRandomMovement(agName, un, terms[3]);
     }
   }
 
@@ -245,15 +263,34 @@ public class RequestGuidance extends DefaultInternalAction {
       MI6Model model = MI6Model.getInstance();
       RandomMovement randomMovement = model.getRandomMovement();
       LocalMap map = model.getAgentMap(agName);
-      String randomDir = randomMovement.getNextDirection(agName, map);
-      if (randomDir == null) randomDir = "n"; // Default direction if all else fails
+
+      int size = (int) ((NumberTerm) terms[1]).solve();
+
+      // Get block direction from terms[2]
+      String blockDirection = null;
+      if (terms[2] instanceof Atom) {
+        String dir = ((Atom) terms[2]).getFunctor();
+        if (!dir.equals("null")) {
+          blockDirection = dir;
+        }
+      }
+
+      String randomDir = randomMovement.getNextDirection(
+        agName,
+        map,
+        size,
+        blockDirection
+      );
+      if (randomDir == null) randomDir = "n";
 
       if (DEBUG) {
         logger.info(
           String.format(
-            "[%s] Using random movement: direction=%s",
+            "[%s] Using random movement: direction=%s, size=%d, blockDir=%s",
             agName,
-            randomDir
+            randomDir,
+            size,
+            blockDirection
           )
         );
       }
@@ -267,7 +304,6 @@ public class RequestGuidance extends DefaultInternalAction {
           e.getMessage()
         )
       );
-      // Ultimate fallback - return north
       return returnSingleDirection("n", un, outputTerm);
     }
   }

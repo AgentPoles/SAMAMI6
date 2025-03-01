@@ -175,6 +175,17 @@ public class PlannedMovement implements MovementStrategy {
 
   @Override
   public String getNextMove(String agName, LocalMap map) {
+    // Call getNextDirection with default size 1 and no block
+    return getNextDirection(agName, map, 1, null);
+  }
+
+  @Override
+  public String getNextDirection(
+    String agName,
+    LocalMap map,
+    int size,
+    String blockDirection
+  ) {
     MovementState state = agentStates.get(agName);
     if (state == null || map == null) return null;
 
@@ -198,7 +209,6 @@ public class PlannedMovement implements MovementStrategy {
     );
 
     if (resolvedMove != null) {
-      // If we got a different move than planned, handle deviation
       if (!resolvedMove.equals(plannedMove)) {
         handleDeviation(state);
       } else {
@@ -207,11 +217,6 @@ public class PlannedMovement implements MovementStrategy {
     }
 
     return resolvedMove;
-  }
-
-  public String getNextMove(String agName) {
-    LocalMap map = MI6Model.getInstance().getAgentMap(agName);
-    return getNextMove(agName, map);
   }
 
   public void setTarget(String agName, Point target, Search.TargetType type) {
