@@ -7,6 +7,11 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class Exploration {
   private static final int ZONE_SIZE = 5;
+  private static final double UNEXPLORED_BONUS = 1.5;
+  private static final double REVISIT_PENALTY = 0.4;
+  private static final int DECAY_TIME = 30000; // 30 seconds
+  private static final double ADJACENT_ZONE_WEIGHT = 0.3;
+
   private final Map<Point, ZoneInfo> zoneMemory = new ConcurrentHashMap<>();
   private final Map<String, Set<Point>> agentVisitedZones = new ConcurrentHashMap<>();
 
@@ -14,22 +19,32 @@ public class Exploration {
     int visits = 0;
     long lastVisitTime = 0;
     double explorationScore = 1.0;
+    Set<String> visitingAgents = new HashSet<>();
 
-    void visit() {
+    void visit(String agName) {
       visits++;
       lastVisitTime = System.currentTimeMillis();
+      visitingAgents.add(agName);
       updateScore();
     }
 
     private void updateScore() {
-      // Decrease score with visits but maintain minimum
-      explorationScore = Math.max(0.2, 1.0 - (visits * 0.2));
+      // Sharper decrease for frequently visited zones
+      explorationScore = Math.max(0.1, 1.0 - (visits * 0.25));
+      // Additional penalty for multiple agents visiting same zone
+      if (visitingAgents.size() > 1) {
+        explorationScore *= 0.8;
+      }
     }
 
     void decay() {
       long timeSinceVisit = System.currentTimeMillis() - lastVisitTime;
-      if (timeSinceVisit > 30000) { // 30 seconds
-        explorationScore = Math.min(1.0, explorationScore + 0.1);
+      if (timeSinceVisit > DECAY_TIME) {
+        explorationScore = Math.min(1.0, explorationScore + 0.15);
+        // Clear old visiting agents
+        if (timeSinceVisit > DECAY_TIME * 2) {
+          visitingAgents.clear();
+        }
       }
     }
   }
@@ -41,32 +56,71 @@ public class Exploration {
     LocalMap map
   ) {
     Point nextPos = calculateNextPosition(currentPos, direction);
-    Point zone = getZone(nextPos);
+    Point nextZone = getZone(nextPos);
 
-    // Get or create zone info
-    ZoneInfo info = zoneMemory.computeIfAbsent(zone, k -> new ZoneInfo());
+    // Get current zone info
+    ZoneInfo info = zoneMemory.computeIfAbsent(nextZone, k -> new ZoneInfo());
     info.decay();
 
-    // Track agent's visited zones
     Set<Point> agentZones = agentVisitedZones.computeIfAbsent(
       agName,
       k -> new HashSet<>()
     );
 
-    // Higher score for unexplored zones
-    double explorationScore = agentZones.contains(zone)
-      ? info.explorationScore
-      : 1.0;
+    // Base score calculation
+    double score;
+    if (!agentZones.contains(nextZone)) {
+      // Bonus for completely new zones
+      score = UNEXPLORED_BONUS;
+    } else {
+      // Penalty for revisiting
+      score = info.explorationScore * REVISIT_PENALTY;
+    }
 
-    return explorationScore;
+    // Consider adjacent zones' exploration status
+    double adjacentScore = getAdjacentZonesScore(nextZone, agName);
+    score += adjacentScore * ADJACENT_ZONE_WEIGHT;
+
+    // Avoid zones with other agents
+    if (
+      info.visitingAgents.size() > 0 && !info.visitingAgents.contains(agName)
+    ) {
+      score *= 0.7;
+    }
+
+    return score;
+  }
+
+  private double getAdjacentZonesScore(Point zone, String agName) {
+    double totalScore = 0;
+    int count = 0;
+
+    // Check all adjacent zones
+    for (int dx = -1; dx <= 1; dx++) {
+      for (int dy = -1; dy <= 1; dy++) {
+        if (dx == 0 && dy == 0) continue;
+
+        Point adjacentZone = new Point(zone.x + dx, zone.y + dy);
+        ZoneInfo info = zoneMemory.get(adjacentZone);
+
+        if (info == null) {
+          // Unexplored adjacent zones are good
+          totalScore += 1.0;
+        } else {
+          totalScore += info.explorationScore;
+        }
+        count++;
+      }
+    }
+
+    return count > 0 ? totalScore / count : 0;
   }
 
   public void recordVisit(String agName, Point position) {
     Point zone = getZone(position);
     ZoneInfo info = zoneMemory.computeIfAbsent(zone, k -> new ZoneInfo());
-    info.visit();
+    info.visit(agName);
 
-    // Record for this agent
     agentVisitedZones.computeIfAbsent(agName, k -> new HashSet<>()).add(zone);
   }
 
