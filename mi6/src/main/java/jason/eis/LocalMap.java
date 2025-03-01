@@ -240,10 +240,16 @@ public class LocalMap {
   private static class BoundaryInfo {
     Point position;
     long confirmationTime;
+    String direction;
 
-    BoundaryInfo(Point pos) {
+    BoundaryInfo(Point pos, String dir) {
       this.position = pos;
       this.confirmationTime = System.currentTimeMillis();
+      this.direction = dir;
+    }
+
+    Point getPosition() {
+      return position;
     }
   }
 
@@ -1050,11 +1056,14 @@ public class LocalMap {
         return;
     }
 
-    confirmedBoundaries.put(direction, new BoundaryInfo(boundaryPos));
+    confirmedBoundaries.put(
+      direction,
+      new BoundaryInfo(boundaryPos, direction)
+    );
 
     if (DEBUG) {
-      System.out.println(
-        "Confirmed boundary " + direction + " at " + boundaryPos
+      logger.info(
+        String.format("Confirmed boundary " + direction + " at " + boundaryPos)
       );
     }
   }
@@ -1088,7 +1097,15 @@ public class LocalMap {
   public Map<String, Point> getConfirmedBoundariesPositions() {
     Map<String, Point> positions = new HashMap<>();
     for (Map.Entry<String, BoundaryInfo> entry : confirmedBoundaries.entrySet()) {
-      positions.put(entry.getKey(), entry.getValue().position);
+      String direction = entry.getKey();
+      Point boundaryPos = entry.getValue().getPosition();
+
+      // Only include relevant coordinate in the string representation
+      if (direction.equals("n") || direction.equals("s")) {
+        positions.put(direction, new Point(0, boundaryPos.y));
+      } else {
+        positions.put(direction, new Point(boundaryPos.x, 0));
+      }
     }
     return positions;
   }
@@ -1151,7 +1168,6 @@ public class LocalMap {
       );
     }
 
-    // First check static obstacles
     if (hasObstacle(pos)) {
       if (DEBUG) {
         logger.info(String.format("Position %s has a static obstacle", pos));
@@ -1159,7 +1175,6 @@ public class LocalMap {
       return true;
     }
 
-    // Then check boundary planes
     Map<String, Point> boundaries = getConfirmedBoundariesPositions();
     if (!boundaries.isEmpty()) {
       for (Map.Entry<String, Point> entry : boundaries.entrySet()) {
@@ -1168,7 +1183,7 @@ public class LocalMap {
 
         boolean isBeyondBoundary = false;
 
-        // Check if position is strictly beyond the boundary plane
+        // Only check relevant coordinate
         switch (direction) {
           case "n":
             isBeyondBoundary = pos.y < boundaryPoint.y;
@@ -1188,10 +1203,13 @@ public class LocalMap {
           if (DEBUG) {
             logger.info(
               String.format(
-                "Position %s is beyond %s boundary at %s",
+                "Position %s is beyond %s boundary at %s=%d",
                 pos,
                 direction,
-                boundaryPoint
+                direction.equals("n") || direction.equals("s") ? "y" : "x",
+                direction.equals("n") || direction.equals("s")
+                  ? boundaryPoint.y
+                  : boundaryPoint.x
               )
             );
           }
@@ -1353,36 +1371,37 @@ public class LocalMap {
       return;
     }
 
-    // Record boundary plane one step beyond the failure point
+    // Record boundary plane with only relevant coordinate
     Point boundaryPoint;
     switch (direction) {
       case "n":
-        boundaryPoint = new Point(currentPos.x, currentPos.y - 1);
+        boundaryPoint = new Point(0, currentPos.y - 1); // Only y matters for north
         break;
       case "s":
-        boundaryPoint = new Point(currentPos.x, currentPos.y + 1);
+        boundaryPoint = new Point(0, currentPos.y + 1); // Only y matters for south
         break;
       case "e":
-        boundaryPoint = new Point(currentPos.x + 1, currentPos.y);
+        boundaryPoint = new Point(currentPos.x + 1, 0); // Only x matters for east
         break;
       case "w":
-        boundaryPoint = new Point(currentPos.x - 1, currentPos.y);
+        boundaryPoint = new Point(currentPos.x - 1, 0); // Only x matters for west
         break;
       default:
         return;
     }
 
-    // Create BoundaryInfo object instead of just using Point
-    BoundaryInfo boundaryInfo = new BoundaryInfo(boundaryPoint);
+    // Create BoundaryInfo object
+    BoundaryInfo boundaryInfo = new BoundaryInfo(boundaryPoint, direction);
     confirmedBoundaries.put(direction, boundaryInfo);
 
     if (DEBUG) {
       logger.info(
         String.format(
-          "Recorded boundary plane at %s in direction %s (one step beyond current position %s)",
-          boundaryPoint,
+          "Recorded boundary plane: %s at %s (relevant coordinate only)",
           direction,
-          currentPos
+          direction.equals("n") || direction.equals("s")
+            ? "y=" + boundaryPoint.y
+            : "x=" + boundaryPoint.x
         )
       );
     }

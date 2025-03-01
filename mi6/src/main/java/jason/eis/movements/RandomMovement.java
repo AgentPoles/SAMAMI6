@@ -385,173 +385,49 @@ public class RandomMovement implements MovementStrategy {
     List<String> availableDirections,
     LocalMap map
   ) {
-    String agName = Thread.currentThread().getName(); // Get current agent name
-    Map<String, Point> boundaries = map.getConfirmedBoundariesPositions();
+    String agName = Thread.currentThread().getName();
 
     if (DEBUG) {
       // Log agent's current state
       logger.info(
         String.format(
-          "[%s] AGENT STATUS - Position: %s, Known boundaries: %s",
+          "[%s] AGENT STATUS - Position: %s, Considering directions: %s",
           agName,
           currentPos,
-          boundaries.isEmpty()
-            ? "none"
-            : boundaries
-              .entrySet()
-              .stream()
-              .map(
-                e ->
-                  String.format(
-                    "%s at %s (plane: %s=%d)",
-                    e.getKey(),
-                    e.getValue(),
-                    e.getKey().equals("n") || e.getKey().equals("s")
-                      ? "y"
-                      : "x",
-                    e.getKey().equals("n") || e.getKey().equals("s")
-                      ? e.getValue().y
-                      : e.getValue().x
-                  )
-              )
-              .collect(Collectors.joining(", "))
+          String.join(", ", availableDirections)
         )
       );
     }
 
     Map<String, Double> scores = new HashMap<>();
-    Map<String, String> boundaryAvoidanceReasons = new HashMap<>();
 
     for (String direction : availableDirections) {
       Point targetPos = calculateNextPosition(currentPos, direction);
-      double score = 1.0;
-      StringBuilder reason = new StringBuilder();
 
-      // Add randomization factor
+      // Add randomization factor to prevent getting stuck in patterns
       double randomFactor = 0.8 + random.nextDouble() * 0.4;
-      score *= randomFactor;
-
-      // Check boundary planes
-      if (!boundaries.isEmpty()) {
-        for (Map.Entry<String, Point> entry : boundaries.entrySet()) {
-          String boundaryDir = entry.getKey();
-          Point boundaryPoint = entry.getValue();
-
-          // Calculate penalty based on boundary direction
-          switch (boundaryDir) {
-            case "n":
-              if (targetPos.y <= boundaryPoint.y) {
-                score = 0.0;
-                if (DEBUG) {
-                  logger.warning(
-                    String.format(
-                      "[%s] BOUNDARY CHECK - Attempted north move at y=%d would cross boundary plane y=%d",
-                      agName,
-                      targetPos.y,
-                      boundaryPoint.y
-                    )
-                  );
-                }
-                reason.append(
-                  String.format(
-                    "BLOCKED: North boundary plane at y=%d; ",
-                    boundaryPoint.y
-                  )
-                );
-              }
-              break;
-            case "s":
-              if (targetPos.y >= boundaryPoint.y) {
-                score = 0.0;
-                if (DEBUG) {
-                  logger.warning(
-                    String.format(
-                      "[%s] BOUNDARY CHECK - Attempted south move at y=%d would cross boundary plane y=%d",
-                      agName,
-                      targetPos.y,
-                      boundaryPoint.y
-                    )
-                  );
-                }
-                reason.append(
-                  String.format(
-                    "BLOCKED: South boundary plane at y=%d; ",
-                    boundaryPoint.y
-                  )
-                );
-              }
-              break;
-            case "e":
-              if (targetPos.x >= boundaryPoint.x) {
-                score = 0.0;
-                if (DEBUG) {
-                  logger.warning(
-                    String.format(
-                      "[%s] BOUNDARY CHECK - Attempted east move at x=%d would cross boundary plane x=%d",
-                      agName,
-                      targetPos.x,
-                      boundaryPoint.x
-                    )
-                  );
-                }
-                reason.append(
-                  String.format(
-                    "BLOCKED: East boundary plane at x=%d; ",
-                    boundaryPoint.x
-                  )
-                );
-              }
-              break;
-            case "w":
-              if (targetPos.x <= boundaryPoint.x) {
-                score = 0.0;
-                if (DEBUG) {
-                  logger.warning(
-                    String.format(
-                      "[%s] BOUNDARY CHECK - Attempted west move at x=%d would cross boundary plane x=%d",
-                      agName,
-                      targetPos.x,
-                      boundaryPoint.x
-                    )
-                  );
-                }
-                reason.append(
-                  String.format(
-                    "BLOCKED: West boundary plane at x=%d; ",
-                    boundaryPoint.x
-                  )
-                );
-              }
-              break;
-          }
-        }
-      }
-
-      scores.put(direction, score);
-      if (reason.length() > 0) {
-        boundaryAvoidanceReasons.put(direction, reason.toString());
-      }
+      double score = randomFactor;
 
       // Debug logging for direction scoring
       if (DEBUG) {
         logger.info(
           String.format(
-            "[%s] MOVE EVALUATION - Direction %s to pos %s scored: %.2f (random=%.2f)%s",
+            "[%s] MOVE EVALUATION - Direction %s to pos %s scored: %.2f (random=%.2f)",
             agName,
             direction,
             targetPos,
             score,
-            randomFactor,
-            reason.length() > 0 ? " Reason: " + reason.toString() : ""
+            randomFactor
           )
         );
       }
+
+      scores.put(direction, score);
     }
 
     String chosen = scores
       .entrySet()
       .stream()
-      .filter(e -> e.getValue() > 0.0)
       .max(Map.Entry.comparingByValue())
       .map(Map.Entry::getKey)
       .orElseGet(() -> getRandomDirection(availableDirections));
@@ -560,16 +436,12 @@ public class RandomMovement implements MovementStrategy {
     if (DEBUG) {
       logger.info(
         String.format(
-          "[%s] MOVE DECISION - At pos %s chose direction %s (score=%.2f) from scores %s%s",
+          "[%s] MOVE DECISION - At pos %s chose direction %s (score=%.2f) from scores %s",
           agName,
           currentPos,
           chosen,
           scores.get(chosen),
-          scores,
-          boundaryAvoidanceReasons.containsKey(chosen)
-            ? "\n    Boundary consideration: " +
-            boundaryAvoidanceReasons.get(chosen)
-            : ""
+          scores
         )
       );
     }
