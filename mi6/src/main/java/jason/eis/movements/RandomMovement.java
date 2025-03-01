@@ -10,7 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
-public class RandomMovement {
+public class RandomMovement implements MovementStrategy {
   private static final Logger logger = Logger.getLogger(
     RandomMovement.class.getName()
   );
@@ -18,17 +18,18 @@ public class RandomMovement {
   private static final int MEMORY_SIZE = 5;
   private static final int ZONE_SIZE = 5;
   private static final double EXPLORATION_WEIGHT = 0.6;
-  private static final int BOUNDARY_AWARENESS = 3;
   private static final double SAFETY_THRESHOLD = 3.0;
   private static final int MAX_ZONE_VISITS = 2;
   private static final double ZONE_WEIGHT = 0.5;
+
+  // Use AgentCollisionHandler's constants instead
+  private static final int AWARENESS_ZONE = 4;
 
   private final Random random = new Random();
   private final Map<String, DirectionMemory> directionMemory = new HashMap<>();
   private final Map<String, AgentZoneMemory> agentZoneMemories = new HashMap<>();
   private final AgentCollisionHandler collisionHandler = new AgentCollisionHandler();
   private final Map<String, EntropyMap> entropyMaps = new ConcurrentHashMap<>();
-  private final Map<String, BoundaryState> boundaryStates = new ConcurrentHashMap<>();
   private final Map<String, StaticObstacleInfo> staticObstacleMemory = new ConcurrentHashMap<>();
   private final Map<String, ObstacleMemory> obstacleMemories = new ConcurrentHashMap<>();
   private final Map<Point, ZoneInfo> zoneMemory = new ConcurrentHashMap<>();
@@ -206,26 +207,9 @@ public class RandomMovement {
       return safeDirections.get(random.nextInt(safeDirections.size()));
     }
 
-    void setBoundaryState(boolean onBoundary, String boundaryDir) {
-      this.isOnBoundary = onBoundary;
-      this.lastBoundaryDirection = boundaryDir;
-      if (!onBoundary) {
-        boundaryAttempts = 0;
-      }
-    }
-
     boolean isStuck() {
       return stuckCount >= 3;
     }
-  }
-
-  private static class BoundaryState {
-    boolean followingBoundary = false;
-    int spiralDepth = 0;
-    String boundaryDirection = null;
-    int boundaryFollowSteps = 0;
-    int spiralTurns = 0;
-    int spiralSteps = 1;
   }
 
   private static class StaticObstacleInfo {
@@ -304,96 +288,330 @@ public class RandomMovement {
   public String getNextDirection(String agName, LocalMap map) {
     if (map == null) {
       logger.warning("Map is null for agent " + agName);
-      return "n"; // Default direction
+      return "e"; // Default direction
     }
     return getNextMove(agName, map);
   }
 
-  private String getNextMove(String agName, LocalMap map) {
-    DirectionMemory memory = directionMemory.computeIfAbsent(
-      agName,
-      k -> new DirectionMemory()
-    );
-
+  @Override
+  public String getNextMove(String agName, LocalMap map) {
     Point currentPos = map.getCurrentPosition();
-    String intendedDirection = calculateIntendedDirection(
-      agName,
-      map,
-      currentPos,
-      memory
-    );
+    if (currentPos == null) return null;
 
-    String resolvedDirection = collisionHandler.resolveCollision(
-      agName,
-      currentPos,
-      intendedDirection,
-      map,
-      false
-    );
-
-    if (resolvedDirection != null) {
-      memory.addMove(resolvedDirection);
+    if (DEBUG) {
+      logger.info(
+        String.format(
+          "[%s] CHECKING MOVES - Current position: %s, Known boundaries: %s",
+          agName,
+          currentPos,
+          map.getConfirmedBoundariesPositions()
+        )
+      );
+      map.logBoundaryState();
     }
 
-    return resolvedDirection;
+    // Get available directions (filtering out static obstacles and boundaries)
+    List<String> availableDirections = Arrays
+      .asList("n", "s", "e", "w")
+      .stream()
+      .filter(
+        dir -> {
+          Point next = calculateNextPosition(currentPos, dir);
+          boolean forbidden = map.isForbidden(next);
+
+          if (DEBUG && forbidden) {
+            logger.info(
+              String.format(
+                "[%s] FORBIDDEN MOVE - Direction %s to %s is forbidden (obstacle or boundary)",
+                agName,
+                dir,
+                next
+              )
+            );
+          }
+
+          return !forbidden;
+        }
+      )
+      .collect(Collectors.toList());
+
+    if (DEBUG) {
+      logger.info(
+        String.format(
+          "[%s] AVAILABLE MOVES - From %s can move: %s",
+          agName,
+          currentPos,
+          availableDirections.isEmpty()
+            ? "none"
+            : String.join(", ", availableDirections)
+        )
+      );
+    }
+
+    // If no available moves, try to find a safe direction
+    if (availableDirections.isEmpty()) {
+      if (DEBUG) {
+        logger.warning(
+          String.format(
+            "[%s] NO AVAILABLE MOVES at %s - Attempting recovery",
+            agName,
+            currentPos
+          )
+        );
+      }
+      return null; // Let the agent's decision-making handle the stuck situation
+    }
+
+    // Use our improved direction selection
+    String chosenDirection = chooseDirection(
+      currentPos,
+      availableDirections,
+      map
+    );
+    return chosenDirection;
   }
 
-  private String calculateIntendedDirection(
-    String agName,
-    LocalMap map,
+  // Add method to record failed moves (called from ASL)
+  public void recordFailedMove(String agName, String attemptedDirection) {
+    Point currentPos = MI6Model
+      .getInstance()
+      .getAgentMap(agName)
+      .getCurrentPosition();
+    collisionHandler.recordFailedMove(agName, currentPos, attemptedDirection);
+  }
+
+  private String chooseDirection(
     Point currentPos,
-    DirectionMemory memory
+    List<String> availableDirections,
+    LocalMap map
   ) {
-    List<String> availableDirections = getAvailableDirections(map, currentPos);
-    if (availableDirections.isEmpty()) {
-      return "skip";
+    String agName = Thread.currentThread().getName(); // Get current agent name
+    Map<String, Point> boundaries = map.getConfirmedBoundariesPositions();
+
+    if (DEBUG) {
+      // Log agent's current state
+      logger.info(
+        String.format(
+          "[%s] AGENT STATUS - Position: %s, Known boundaries: %s",
+          agName,
+          currentPos,
+          boundaries.isEmpty()
+            ? "none"
+            : boundaries
+              .entrySet()
+              .stream()
+              .map(
+                e ->
+                  String.format(
+                    "%s at %s (plane: %s=%d)",
+                    e.getKey(),
+                    e.getValue(),
+                    e.getKey().equals("n") || e.getKey().equals("s")
+                      ? "y"
+                      : "x",
+                    e.getKey().equals("n") || e.getKey().equals("s")
+                      ? e.getValue().y
+                      : e.getValue().x
+                  )
+              )
+              .collect(Collectors.joining(", "))
+        )
+      );
     }
 
     Map<String, Double> scores = new HashMap<>();
+    Map<String, String> boundaryAvoidanceReasons = new HashMap<>();
+
     for (String direction : availableDirections) {
       Point targetPos = calculateNextPosition(currentPos, direction);
-      if (targetPos == null) continue;
+      double score = 1.0;
+      StringBuilder reason = new StringBuilder();
 
-      double score = evaluatePosition(targetPos, map, memory);
+      // Add randomization factor
+      double randomFactor = 0.8 + random.nextDouble() * 0.4;
+      score *= randomFactor;
 
-      // Entropy factor
-      EntropyMap entropyMap = entropyMaps.computeIfAbsent(
-        agName,
-        k -> new EntropyMap()
-      );
-      score *= (1.0 - entropyMap.getHeat(targetPos));
+      // Check boundary planes
+      if (!boundaries.isEmpty()) {
+        for (Map.Entry<String, Point> entry : boundaries.entrySet()) {
+          String boundaryDir = entry.getKey();
+          Point boundaryPoint = entry.getValue();
 
-      // Momentum factor
-      if (direction.equals(memory.getLastDirection())) {
-        score *= 1.2;
+          // Calculate penalty based on boundary direction
+          switch (boundaryDir) {
+            case "n":
+              if (targetPos.y <= boundaryPoint.y) {
+                score = 0.0;
+                if (DEBUG) {
+                  logger.warning(
+                    String.format(
+                      "[%s] BOUNDARY CHECK - Attempted north move at y=%d would cross boundary plane y=%d",
+                      agName,
+                      targetPos.y,
+                      boundaryPoint.y
+                    )
+                  );
+                }
+                reason.append(
+                  String.format(
+                    "BLOCKED: North boundary plane at y=%d; ",
+                    boundaryPoint.y
+                  )
+                );
+              }
+              break;
+            case "s":
+              if (targetPos.y >= boundaryPoint.y) {
+                score = 0.0;
+                if (DEBUG) {
+                  logger.warning(
+                    String.format(
+                      "[%s] BOUNDARY CHECK - Attempted south move at y=%d would cross boundary plane y=%d",
+                      agName,
+                      targetPos.y,
+                      boundaryPoint.y
+                    )
+                  );
+                }
+                reason.append(
+                  String.format(
+                    "BLOCKED: South boundary plane at y=%d; ",
+                    boundaryPoint.y
+                  )
+                );
+              }
+              break;
+            case "e":
+              if (targetPos.x >= boundaryPoint.x) {
+                score = 0.0;
+                if (DEBUG) {
+                  logger.warning(
+                    String.format(
+                      "[%s] BOUNDARY CHECK - Attempted east move at x=%d would cross boundary plane x=%d",
+                      agName,
+                      targetPos.x,
+                      boundaryPoint.x
+                    )
+                  );
+                }
+                reason.append(
+                  String.format(
+                    "BLOCKED: East boundary plane at x=%d; ",
+                    boundaryPoint.x
+                  )
+                );
+              }
+              break;
+            case "w":
+              if (targetPos.x <= boundaryPoint.x) {
+                score = 0.0;
+                if (DEBUG) {
+                  logger.warning(
+                    String.format(
+                      "[%s] BOUNDARY CHECK - Attempted west move at x=%d would cross boundary plane x=%d",
+                      agName,
+                      targetPos.x,
+                      boundaryPoint.x
+                    )
+                  );
+                }
+                reason.append(
+                  String.format(
+                    "BLOCKED: West boundary plane at x=%d; ",
+                    boundaryPoint.x
+                  )
+                );
+              }
+              break;
+          }
+        }
       }
 
-      // Randomization
-      score *= (0.9 + random.nextDouble() * 0.2);
-
       scores.put(direction, score);
+      if (reason.length() > 0) {
+        boundaryAvoidanceReasons.put(direction, reason.toString());
+      }
+
+      // Debug logging for direction scoring
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "[%s] MOVE EVALUATION - Direction %s to pos %s scored: %.2f (random=%.2f)%s",
+            agName,
+            direction,
+            targetPos,
+            score,
+            randomFactor,
+            reason.length() > 0 ? " Reason: " + reason.toString() : ""
+          )
+        );
+      }
     }
 
-    return scores
+    String chosen = scores
       .entrySet()
       .stream()
+      .filter(e -> e.getValue() > 0.0)
       .max(Map.Entry.comparingByValue())
       .map(Map.Entry::getKey)
-      .orElse(
-        availableDirections.get(random.nextInt(availableDirections.size()))
+      .orElseGet(() -> getRandomDirection(availableDirections));
+
+    // Debug log the final decision
+    if (DEBUG) {
+      logger.info(
+        String.format(
+          "[%s] MOVE DECISION - At pos %s chose direction %s (score=%.2f) from scores %s%s",
+          agName,
+          currentPos,
+          chosen,
+          scores.get(chosen),
+          scores,
+          boundaryAvoidanceReasons.containsKey(chosen)
+            ? "\n    Boundary consideration: " +
+            boundaryAvoidanceReasons.get(chosen)
+            : ""
+        )
       );
+    }
+
+    return chosen;
   }
 
-  private double evaluatePosition(
-    Point targetPos,
-    LocalMap map,
-    DirectionMemory memory
-  ) {
+  private double evaluatePosition(Point targetPos, LocalMap map) {
     double score = 1.0;
 
     // Consider open spaces
     int openSpaces = countAdjacentOpenSpaces(targetPos, map);
     score *= (1.0 + (openSpaces / 8.0));
+
+    // Consider distance to boundaries
+    Map<String, Point> boundaries = map.getConfirmedBoundariesPositions();
+    if (!boundaries.isEmpty()) {
+      double minBoundaryDistance = Double.MAX_VALUE;
+      for (Map.Entry<String, Point> entry : boundaries.entrySet()) {
+        Point boundaryPoint = entry.getValue();
+        double distance;
+
+        switch (entry.getKey()) {
+          case "n":
+          case "s":
+            distance = Math.abs(targetPos.y - boundaryPoint.y);
+            break;
+          case "e":
+          case "w":
+            distance = Math.abs(targetPos.x - boundaryPoint.x);
+            break;
+          default:
+            continue;
+        }
+        minBoundaryDistance = Math.min(minBoundaryDistance, distance);
+      }
+
+      // Apply boundary distance penalty
+      if (minBoundaryDistance < AWARENESS_ZONE) {
+        score *= (minBoundaryDistance / AWARENESS_ZONE);
+      }
+    }
 
     return score;
   }
@@ -404,7 +622,7 @@ public class RandomMovement {
       for (int dy = -1; dy <= 1; dy++) {
         if (dx == 0 && dy == 0) continue;
         Point checkPos = new Point(pos.x + dx, pos.y + dy);
-        if (!map.hasObstacle(checkPos)) {
+        if (!map.hasObstacle(checkPos) && !map.isOutOfBounds(checkPos)) {
           count++;
         }
       }
@@ -682,69 +900,6 @@ public class RandomMovement {
     return availableDirections.get(random.nextInt(availableDirections.size()));
   }
 
-  private String handleBoundaryFollowing(
-    String agName,
-    LocalMap map,
-    List<String> availableDirections
-  ) {
-    BoundaryState state = boundaryStates.computeIfAbsent(
-      agName,
-      k -> new BoundaryState()
-    );
-
-    if (state.followingBoundary) {
-      if (state.boundaryFollowSteps > 5) { // Start spiraling inward
-        state.followingBoundary = false;
-        state.spiralDepth++;
-        return getSpiralDirection(state, availableDirections);
-      }
-      // Continue following boundary
-      state.boundaryFollowSteps++;
-      return getParallelDirection(state.boundaryDirection, availableDirections);
-    }
-
-    // Check if we hit a boundary
-    if (availableDirections.size() <= 2) { // Likely at a boundary
-      state.followingBoundary = true;
-      state.boundaryDirection = detectBoundaryDirection(map);
-      state.boundaryFollowSteps = 0;
-      return getParallelDirection(state.boundaryDirection, availableDirections);
-    }
-
-    return null; // No boundary handling needed
-  }
-
-  private static class DirectionScore {
-    final String direction;
-    final double safetyScore;
-    final double entropyScore;
-    final double momentumScore;
-    final double zoneScore;
-
-    DirectionScore(
-      String direction,
-      double safetyScore,
-      double entropyScore,
-      double momentumScore,
-      double zoneScore
-    ) {
-      this.direction = direction;
-      this.safetyScore = safetyScore;
-      this.entropyScore = entropyScore;
-      this.momentumScore = momentumScore;
-      this.zoneScore = zoneScore;
-    }
-
-    double getTotalScore(DirectionMemory memory) {
-      return (
-        (safetyScore * memory.obstacleWeight) +
-        (entropyScore * memory.entropyWeight) +
-        (momentumScore * memory.momentumWeight) +
-        (zoneScore * ZONE_WEIGHT)
-      );
-    }
-  }
-
   private void updateStaticObstacleInfo(
     String agName,
     LocalMap map,
@@ -807,8 +962,8 @@ public class RandomMovement {
           currentPos,
           boundaryDir
         );
-        if (distanceToBoundary < BOUNDARY_AWARENESS) {
-          score *= (distanceToBoundary / BOUNDARY_AWARENESS);
+        if (distanceToBoundary < AWARENESS_ZONE) {
+          score *= (distanceToBoundary / (double) AWARENESS_ZONE);
         }
       }
     }
@@ -857,7 +1012,7 @@ public class RandomMovement {
     int x = pos.x;
     int y = pos.y;
 
-    while (distance < BOUNDARY_AWARENESS) {
+    while (distance < AWARENESS_ZONE) {
       switch (direction) {
         case "n":
           y--;
@@ -879,7 +1034,7 @@ public class RandomMovement {
       }
       distance++;
     }
-    return BOUNDARY_AWARENESS;
+    return AWARENESS_ZONE;
   }
 
   private Point getCurrentZone(Point position) {
@@ -909,41 +1064,6 @@ public class RandomMovement {
     }
 
     return Math.min(1.0, minDistance / SAFETY_THRESHOLD);
-  }
-
-  private String getSpiralDirection(
-    BoundaryState state,
-    List<String> availableDirections
-  ) {
-    if (state.spiralTurns >= 4) {
-      state.spiralTurns = 0;
-      state.spiralSteps++;
-    }
-
-    String direction = null;
-    switch (state.spiralTurns) {
-      case 0:
-        direction = "n";
-        break;
-      case 1:
-        direction = "e";
-        break;
-      case 2:
-        direction = "s";
-        break;
-      case 3:
-        direction = "w";
-        break;
-    }
-
-    if (availableDirections.contains(direction)) {
-      state.spiralTurns++;
-      return direction;
-    }
-
-    // If preferred direction is not available, try the next one
-    state.spiralTurns++;
-    return getSpiralDirection(state, availableDirections);
   }
 
   private String getParallelDirection(
@@ -1129,6 +1249,7 @@ public class RandomMovement {
   }
 
   private Point calculateNextPosition(Point current, String direction) {
+    if (direction == null) return current;
     switch (direction) {
       case "n":
         return new Point(current.x, current.y - 1);
@@ -1218,7 +1339,7 @@ public class RandomMovement {
       Point targetPos = calculateNextPosition(currentPos, direction);
       if (targetPos == null) continue;
 
-      double score = evaluatePosition(targetPos, map, memory);
+      double score = evaluatePosition(targetPos, map);
 
       // Add momentum factor
       if (direction.equals(memory.getLastDirection())) {
@@ -1302,38 +1423,23 @@ public class RandomMovement {
       switch (direction) {
         case "n":
           distance = Math.abs(pos.y - boundary.y);
-          if (distance <= BOUNDARY_AWARENESS) return true;
+          if (distance <= AWARENESS_ZONE) return true;
           break;
         case "s":
           distance = Math.abs(pos.y - boundary.y);
-          if (distance <= BOUNDARY_AWARENESS) return true;
+          if (distance <= AWARENESS_ZONE) return true;
           break;
         case "e":
           distance = Math.abs(pos.x - boundary.x);
-          if (distance <= BOUNDARY_AWARENESS) return true;
+          if (distance <= AWARENESS_ZONE) return true;
           break;
         case "w":
           distance = Math.abs(pos.x - boundary.x);
-          if (distance <= BOUNDARY_AWARENESS) return true;
+          if (distance <= AWARENESS_ZONE) return true;
           break;
       }
     }
     return false;
-  }
-
-  private double evaluatePosition(Point targetPos, LocalMap map) {
-    double score = 1.0;
-
-    // Boundary avoidance
-    if (isNearBoundary(targetPos, map)) {
-      score *= 0.2;
-    }
-
-    // Consider open spaces
-    int openSpaces = countAdjacentOpenSpaces(targetPos, map);
-    score *= (1.0 + (openSpaces / 8.0));
-
-    return score;
   }
 
   private boolean isParallelMovement(
@@ -1417,5 +1523,20 @@ public class RandomMovement {
       }
     }
     return false;
+  }
+
+  private String handleCollision(
+    String agName,
+    Point currentPos,
+    LocalMap map,
+    boolean hasBlock
+  ) {
+    return collisionHandler.resolveCollision(
+      agName,
+      currentPos,
+      null,
+      map,
+      hasBlock
+    );
   }
 }

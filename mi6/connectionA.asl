@@ -1,56 +1,68 @@
-/* Plans */
-+goal(X,Y)[source(percept)] : true <-
-    helpermodels.AddGoal(X, Y).
+// Combined action result handling with parameters
++lastAction(move)[source(percept)] : 
+    lastActionResult(Result)[source(percept)] & 
+    lastActionParams([Dir])[source(percept)]
+<- 
+    .print("DEBUG: Move action ", Dir, " resulted in ", Result);
+    if (Result == failed_forbidden) {
+        .print("BOUNDARY DETECTED: Failed moving ", Dir);
+        helpermodels.AddMovementFailure(failed_forbidden, Dir);
+    } elif (Result == failed_path) {
+        .print("PATH BLOCKED: Failed moving ", Dir);
+        helpermodels.AddMovementFailure(failed_path, Dir);
+    } elif (Result == success) {
+        .print("Move succeeded in direction: ", Dir);
+    }.
 
-+obstacle(X,Y)[source(percept)] : true <-
-    helpermodels.AddObstacle(X, Y).
+// Debug all percepts
++percept(P)[source(percept)] : true <-
+    .print("DEBUG: Received percept: ", P).
 
-+thing(X,Y,dispenser,Detail)[source(percept)] : true <-
-    helpermodels.AddDispenser(X, Y, Detail).
+// Track last action
++lastAction(A)[source(percept)] : true <-
+    .print("DEBUG: Last action performed: ", A);
+    +my_last_action(A).
 
-+thing(X,Y,entity,_)[source(percept)] : true <-
-    helpermodels.AddOtherAgents(X, Y).
+// Debug all action results with more detail
++lastActionResult(R)[source(percept)] : lastActionParams([Dir])[source(percept)] <-
+    .print("DEBUG: Action result received: ", R, " with direction ", Dir);
+    if (R == failed_forbidden) {
+        .print("BOUNDARY DETECTED: Failed moving ", Dir);
+        helpermodels.AddMovementFailure(failed_forbidden, Dir);
+    } elif (R == failed_path) {
+        .print("PATH BLOCKED: Failed moving ", Dir);
+        helpermodels.AddMovementFailure(failed_path, Dir);
+    } elif (R == success) {
+        .print("Move succeeded in direction: ", Dir);
+    }.
 
-+step(X):task(TaskID,_,_,[req(0,1,Type)]) & attached(0,1) & goal(0,0) <- submit(TaskID).
-
-//rotating the block
-+step(X): goal(0,0) & attached(1,0) <-  rotate(cw).
-+step(X): goal(0,0) & attached(-1,0) <- rotate(ccw).
-+step(X): goal(0,0) & attached(0,-1) <- rotate(cw).
-      
-
-//moving randomly after attaching
-+step(X) : true & attached(_,_) <- !move_random(goal).
-
-//attaching blocks
-+step(X) : thing(1,0,block,_) & thing(1,0,dispenser,_) <- attach(e).
-+step(X) : thing(0,1,block,_) & thing(0,1,dispenser,_) <- attach(s).
-+step(X) : thing(-1,0,block,_) & thing(-1,0,dispenser,_) <- attach(w).
-+step(X) : thing(0,-1,block,_) & thing(0,-1,dispenser,_) <- attach(n).
-
-//requesting blocks
-+step(X) : thing(1,0,dispenser,_) & not attached(_,_) <- request(e).
-+step(X) : thing(0,1,dispenser,_) & not attached(_,_) <- request(s).
-+step(X) : thing(-1,0,dispenser,_) & not attached(_,_) <- request(w).
-+step(X) : thing(0,-1,dispenser,_) & not attached(_,_) <- request(n).
-
-+step(X) : true <- 
-	!move_random(dispenser).
-
-+actionResult(move,failed_path)[source(percept)] : true <-
-    .print("Move failed: path blocked");
-    helpermodels.AddMovementFailure(failed_path).
-
-+actionResult(move,failed_forbidden)[source(percept)] : true <-
-    .print("Move failed: boundary detected");
-    helpermodels.AddMovementFailure(failed_forbidden).
-
+// Step handling with debug
++step(X) : true <-
+    .print("Step ", X, " started for agent ", .my_name);
+    !move_random(dispenser).
+    
+// Movement with debug
 +!move_random(Target): helpermodels.RequestGuidance(Target,1,Dir)
-<-  .print("Moving towards dispenser: ", Dir);
+<- 
+    .print("DEBUG: Attempting to move towards ", Target, " in direction ", Dir);
     move(Dir);
+    .print("DEBUG: Move action sent");
     helpermodels.UpdateMovement(Dir).
 
 +!move_random(_)
-<-  .print("No guidance available, moving north");
+<- 
+    .print("DEBUG: No guidance, attempting to move north");
     move(n);
+    .print("DEBUG: North move action sent");
     helpermodels.UpdateMovement(n).
+
+// Error handling with debug
+-!move_random(Target)[error(Error), error_msg(Msg)] : true <-
+    .print("ERROR in move_random: ", Error, " - ", Msg);
+    .wait(500);
+    !move_random(Target).
+
+// Catch-all for unhandled failures
+-!G[error(Error), error_msg(Msg)] : true <- 
+    .print("UNHANDLED ERROR: ", G, " failed with ", Error, " - ", Msg).
+

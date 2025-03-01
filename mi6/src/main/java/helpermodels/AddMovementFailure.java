@@ -6,6 +6,7 @@ import jason.asSemantics.Unifier;
 import jason.asSyntax.Term;
 import jason.eis.LocalMap;
 import jason.eis.MI6Model;
+import jason.eis.movements.AgentCollisionHandler;
 import java.util.logging.Logger;
 
 public class AddMovementFailure extends DefaultInternalAction {
@@ -13,6 +14,7 @@ public class AddMovementFailure extends DefaultInternalAction {
     AddMovementFailure.class.getName()
   );
   private static MI6Model model = MI6Model.getInstance();
+  private static AgentCollisionHandler collisionHandler = new AgentCollisionHandler();
 
   @Override
   public Object execute(TransitionSystem ts, Unifier un, Term[] args)
@@ -20,6 +22,7 @@ public class AddMovementFailure extends DefaultInternalAction {
     try {
       String agName = ts.getUserAgArch().getAgName();
       String failureType = args[0].toString();
+      String attemptedDirection = args[1].toString();
 
       LocalMap map = model.getAgentMap(agName);
       if (map == null) {
@@ -27,10 +30,16 @@ public class AddMovementFailure extends DefaultInternalAction {
         return false;
       }
 
+      collisionHandler.recordFailedMove(
+        agName,
+        map.getCurrentPosition(),
+        attemptedDirection
+      );
+
       switch (failureType) {
         case "failed_forbidden":
           logger.info("Agent " + agName + " hit boundary");
-          map.handleBoundaryFailure();
+          map.handleBoundaryFailure(attemptedDirection);
           break;
         case "failed_path":
           logger.info("Agent " + agName + " path blocked");

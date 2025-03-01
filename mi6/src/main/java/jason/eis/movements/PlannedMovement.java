@@ -181,37 +181,32 @@ public class PlannedMovement implements MovementStrategy {
     Point currentPos = map.getCurrentPosition();
     if (currentPos == null) return null;
 
-    // Get the planned move
-    String plannedMove = state.getCurrentStep();
+    // Get or calculate the planned move
+    String plannedMove = getPlannedMove(state, currentPos, map);
     if (plannedMove == null) return null;
 
-    // Check for immediate threats and handle them
-    if (hasImmediateThreat(currentPos, map)) {
-      if (DEBUG) logger.info(
-        String.format(
-          "[%s] Immediate threat detected, using collision handler",
-          agName
-        )
-      );
-      return handleImmediateThreat(agName, state, currentPos, plannedMove, map);
+    // Convert planned move direction to target Point
+    Point targetPos = calculateNextPosition(currentPos, plannedMove);
+
+    // Let collision handler handle both dynamic obstacles and boundaries
+    String resolvedMove = collisionHandler.resolveCollision(
+      agName,
+      currentPos,
+      targetPos,
+      map,
+      false
+    );
+
+    if (resolvedMove != null) {
+      // If we got a different move than planned, handle deviation
+      if (!resolvedMove.equals(plannedMove)) {
+        handleDeviation(state);
+      } else {
+        state.currentPathIndex++;
+      }
     }
 
-    // Look ahead for potential obstacles
-    if (
-      isPathSegmentBlocked(currentPos, state.getNextSteps(LOOKAHEAD_STEPS), map)
-    ) {
-      if (DEBUG) logger.info(
-        String.format(
-          "[%s] Path segment blocked, attempting resolution",
-          agName
-        )
-      );
-      return handleBlockedPath(agName, state, currentPos, map);
-    }
-
-    // Execute planned move if path is clear
-    state.currentPathIndex++;
-    return plannedMove;
+    return resolvedMove;
   }
 
   public String getNextMove(String agName) {
@@ -343,159 +338,46 @@ public class PlannedMovement implements MovementStrategy {
     );
   }
 
-  private String calculateIntendedMove(MovementState state, LocalMap map) {
+  private String getPlannedMove(
+    MovementState state,
+    Point currentPos,
+    LocalMap map
+  ) {
+    // Recalculate path if needed
     if (state.needsNewPath()) {
       Search.PathResult path = search.findPath(
-        map.getCurrentPosition(),
+        currentPos,
         state.targetPosition,
         map,
         state.targetType
       );
 
-      if (path.success) {
-        state.plannedPath = path.directions;
-        state.pathCalculatedTime = System.currentTimeMillis();
-        state.currentPathIndex = 0;
+      if (path != null && path.success) {
+        state.setNewPath(path.directions);
       } else {
         return null;
       }
     }
 
-    if (
-      state.plannedPath.isEmpty() ||
-      state.currentPathIndex >= state.plannedPath.size()
-    ) {
-      return null;
-    }
-
-    return state.plannedPath.get(state.currentPathIndex);
+    return state.getCurrentStep();
   }
 
-  private String getNextSafeMove(String plannedDirection, LocalMap map) {
-    if (!MovementUtils.wouldHitBoundary(map, plannedDirection)) {
-      return plannedDirection;
+  private void handleDeviation(MovementState state) {
+    state.deviationAttempts++;
+    state.isDeviating = true;
+
+    // If we've deviated too many times, force path recalculation
+    if (state.deviationAttempts >= MAX_DEVIATION_ATTEMPTS) {
+      state.plannedPath.clear(); // This will trigger recalculation on next turn
     }
-    // Need to replan path
-    return null;
   }
 
-  public String getNextMove(
-    String agName,
-    LocalMap map,
-    Point target,
-    boolean hasBlock
-  ) {
-    Point currentPos = map.getCurrentPosition();
-
-    // Get or calculate path
-    Deque<String> path = getOrCalculatePath(agName, currentPos, target, map);
-    if (path == null || path.isEmpty()) {
-      return null;
-    }
-
-    String intendedDirection = path.peek();
-
-    // Use collision handler to resolve any potential conflicts
-    String resolvedDirection = collisionHandler.resolveCollision(
-      agName,
-      currentPos,
-      intendedDirection,
-      map,
-      hasBlock
-    );
-
-    // If the resolved direction matches intended, remove it from the path
-    if (resolvedDirection.equals(intendedDirection)) {
-      path.poll();
-    }
-    // If we got a different direction or skip, we'll keep the path but try again next turn
-
-    return resolvedDirection;
-  }
-
-  private Deque<String> getOrCalculatePath(
-    String agName,
-    Point current,
-    Point target,
-    LocalMap map
-  ) {
-    Deque<String> existingPath = plannedPaths.get(agName);
-    MovementState state = agentStates.get(agName);
-
-    // Recalculate path if none exists or target changed
-    if (
-      existingPath == null ||
-      existingPath.isEmpty() ||
-      !willReachTarget(current, existingPath, target)
-    ) {
-      Search.PathResult result = calculatePath(
-        map,
-        current,
-        target,
-        state.targetType
-      );
-      if (result != null && result.success) {
-        return new ArrayDeque<>(result.directions);
-      }
-    }
-    return existingPath != null ? existingPath : new ArrayDeque<>();
-  }
-
-  /**
-   * Checks if there are any immediate threats (agents very close by)
-   */
-  private boolean hasImmediateThreat(Point currentPos, LocalMap map) {
-    return map
-      .getDynamicObstacles()
-      .values()
-      .stream()
-      .anyMatch(
-        obstacle -> {
-          Point obstaclePos = obstacle.getPosition();
-          return (
-            getManhattanDistance(currentPos, obstaclePos) <= CRITICAL_DISTANCE
-          );
-        }
-      );
-  }
-
-  /**
-   * Handles immediate threats using the collision handler
-   */
-  private String handleImmediateThreat(
-    String agName,
-    MovementState state,
-    Point currentPos,
-    String plannedMove,
-    LocalMap map
-  ) {
-    String resolvedMove = collisionHandler.resolveCollision(
-      agName,
-      currentPos,
-      plannedMove,
-      map,
-      false
-    );
-
-    // If we got a different move, increment deviation attempts
-    if (!resolvedMove.equals(plannedMove)) {
-      state.deviationAttempts++;
-      state.isDeviating = true;
-    }
-
-    return resolvedMove;
-  }
-
-  /**
-   * Checks if a sequence of planned moves is blocked by dynamic obstacles
-   */
   private boolean isPathSegmentBlocked(
     Point start,
     List<String> moves,
     LocalMap map
   ) {
     Point current = new Point(start.x, start.y);
-
     for (String move : moves) {
       current = calculateNextPosition(current, move);
       if (isDynamicallyBlocked(current, map)) {
@@ -505,121 +387,6 @@ public class PlannedMovement implements MovementStrategy {
     return false;
   }
 
-  /**
-   * Handles a blocked path segment with progressive response levels
-   */
-  private String handleBlockedPath(
-    String agName,
-    MovementState state,
-    Point currentPos,
-    LocalMap map
-  ) {
-    // Level 4: If we've deviated too many times, recalculate entire path
-    if (state.deviationAttempts >= MAX_DEVIATION_ATTEMPTS) {
-      if (DEBUG) logger.info(
-        String.format("[%s] Max deviations reached, recalculating path", agName)
-      );
-      return recalculateEntirePath(agName, state, currentPos, map);
-    }
-
-    // Level 3: Try to find alternative path segment
-    List<String> alternativeSegment = findAlternativeSegment(
-      currentPos,
-      state.targetPosition,
-      state.getNextSteps(LOOKAHEAD_STEPS),
-      map
-    );
-
-    if (alternativeSegment != null && !alternativeSegment.isEmpty()) {
-      // Replace current path segment with alternative
-      state.plannedPath = new ArrayList<>(alternativeSegment);
-      state.currentPathIndex = 0;
-      state.isDeviating = true;
-      state.deviationAttempts++;
-      return state.getCurrentStep();
-    }
-
-    // Level 2: If no alternative segment found, use collision handler for one step
-    return handleImmediateThreat(
-      agName,
-      state,
-      currentPos,
-      state.getCurrentStep(),
-      map
-    );
-  }
-
-  /**
-   * Attempts to find an alternative path segment that avoids obstacles
-   */
-  private List<String> findAlternativeSegment(
-    Point start,
-    Point target,
-    List<String> originalSegment,
-    LocalMap map
-  ) {
-    // Try to find a path that rejoins the original path
-    Point rejoinPoint = findRejoinPoint(start, originalSegment, map);
-    if (rejoinPoint != null) {
-      Search.PathResult altPath = search.findPath(
-        start,
-        rejoinPoint,
-        map,
-        null
-      );
-      if (altPath != null && altPath.success) {
-        return altPath.directions;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Finds a suitable point to rejoin the original path
-   */
-  private Point findRejoinPoint(
-    Point start,
-    List<String> remainingPath,
-    LocalMap map
-  ) {
-    Point current = new Point(start.x, start.y);
-    for (int i = 0; i < remainingPath.size(); i++) {
-      current = calculateNextPosition(current, remainingPath.get(i));
-      if (!isDynamicallyBlocked(current, map)) {
-        return current;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Recalculates the entire path when other strategies fail
-   */
-  private String recalculateEntirePath(
-    String agName,
-    MovementState state,
-    Point currentPos,
-    LocalMap map
-  ) {
-    Search.PathResult newPath = search.findPath(
-      currentPos,
-      state.targetPosition,
-      map,
-      state.targetType
-    );
-
-    if (newPath != null && newPath.success) {
-      state.setNewPath(newPath.directions);
-      return state.getCurrentStep();
-    }
-
-    // If recalculation fails, return null to trigger fallback behavior
-    return null;
-  }
-
-  /**
-   * Checks if a position is blocked by dynamic obstacles
-   */
   private boolean isDynamicallyBlocked(Point pos, LocalMap map) {
     return map
       .getDynamicObstacles()
@@ -671,21 +438,5 @@ public class PlannedMovement implements MovementStrategy {
       default:
         return current;
     }
-  }
-
-  /**
-   * Checks if the current path will reach the target
-   */
-  private boolean willReachTarget(
-    Point current,
-    Deque<String> path,
-    Point target
-  ) {
-    if (path == null || path.isEmpty()) return false;
-    Point finalPos = current;
-    for (String move : path) {
-      finalPos = calculateNextPosition(finalPos, move);
-    }
-    return finalPos.equals(target);
   }
 }

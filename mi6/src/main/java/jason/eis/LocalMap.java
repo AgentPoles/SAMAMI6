@@ -15,7 +15,7 @@ public class LocalMap {
   );
   private static final int CELL_SIZE = 8; // Power of 2 for efficient division
   private static final int STALE_THRESHOLD = 30000; // 30 seconds in milliseconds
-  public static boolean DEBUG = true;
+  public static boolean DEBUG = false;
 
   // Current position tracking
   private Point currentPosition;
@@ -1086,11 +1086,11 @@ public class LocalMap {
   }
 
   public Map<String, Point> getConfirmedBoundariesPositions() {
-    Map<String, Point> boundaries = new HashMap<>();
+    Map<String, Point> positions = new HashMap<>();
     for (Map.Entry<String, BoundaryInfo> entry : confirmedBoundaries.entrySet()) {
-      boundaries.put(entry.getKey(), entry.getValue().position);
+      positions.put(entry.getKey(), entry.getValue().position);
     }
-    return boundaries;
+    return positions;
   }
 
   public void updateFromPercepts(Collection<Term> percepts, Point currentPos) {
@@ -1141,29 +1141,66 @@ public class LocalMap {
   }
 
   public boolean isForbidden(Point pos) {
-    // Check against confirmed boundaries
-    for (Map.Entry<String, BoundaryInfo> entry : confirmedBoundaries.entrySet()) {
-      String direction = entry.getKey();
-      Point boundary = entry.getValue().position;
+    if (DEBUG) {
+      logger.info(
+        String.format(
+          "Checking if position %s is forbidden. Current boundaries: %s",
+          pos,
+          getConfirmedBoundariesPositions()
+        )
+      );
+    }
 
-      switch (direction) {
-        case "n":
-          if (pos.y <= boundary.y) return true;
-          break;
-        case "s":
-          if (pos.y >= boundary.y) return true;
-          break;
-        case "w":
-          if (pos.x <= boundary.x) return true;
-          break;
-        case "e":
-          if (pos.x >= boundary.x) return true;
-          break;
+    // First check static obstacles
+    if (hasObstacle(pos)) {
+      if (DEBUG) {
+        logger.info(String.format("Position %s has a static obstacle", pos));
+      }
+      return true;
+    }
+
+    // Then check boundary planes
+    Map<String, Point> boundaries = getConfirmedBoundariesPositions();
+    if (!boundaries.isEmpty()) {
+      for (Map.Entry<String, Point> entry : boundaries.entrySet()) {
+        String direction = entry.getKey();
+        Point boundaryPoint = entry.getValue();
+
+        boolean isBeyondBoundary = false;
+
+        // Check if position is strictly beyond the boundary plane
+        switch (direction) {
+          case "n":
+            isBeyondBoundary = pos.y < boundaryPoint.y;
+            break;
+          case "s":
+            isBeyondBoundary = pos.y > boundaryPoint.y;
+            break;
+          case "e":
+            isBeyondBoundary = pos.x > boundaryPoint.x;
+            break;
+          case "w":
+            isBeyondBoundary = pos.x < boundaryPoint.x;
+            break;
+        }
+
+        if (isBeyondBoundary) {
+          if (DEBUG) {
+            logger.info(
+              String.format(
+                "Position %s is beyond %s boundary at %s",
+                pos,
+                direction,
+                boundaryPoint
+              )
+            );
+          }
+          return true;
+        }
       }
     }
 
-    // Check against known obstacles
-    return staticObstacles.containsKey(pos);
+    return false;
   }
 
   // Renamed from isOutOfBounds to better reflect its purpose
@@ -1309,26 +1346,45 @@ public class LocalMap {
     return false;
   }
 
-  public void handleBoundaryFailure() {
-    try {
-      Point currentPos = getCurrentPosition();
-      if (currentPos == null) {
-        logger.warning("Cannot handle boundary failure - no current position");
+  public void handleBoundaryFailure(String direction) {
+    Point currentPos = getCurrentPosition();
+    if (currentPos == null) {
+      logger.warning("Cannot handle boundary failure - no current position");
+      return;
+    }
+
+    // Record boundary plane one step beyond the failure point
+    Point boundaryPoint;
+    switch (direction) {
+      case "n":
+        boundaryPoint = new Point(currentPos.x, currentPos.y - 1);
+        break;
+      case "s":
+        boundaryPoint = new Point(currentPos.x, currentPos.y + 1);
+        break;
+      case "e":
+        boundaryPoint = new Point(currentPos.x + 1, currentPos.y);
+        break;
+      case "w":
+        boundaryPoint = new Point(currentPos.x - 1, currentPos.y);
+        break;
+      default:
         return;
-      }
+    }
 
-      // Determine the direction that caused the boundary hit
-      String direction = lastAttemptedMove != null
-        ? getDirectionFromPositions(currentPos, lastAttemptedMove)
-        : null;
+    // Create BoundaryInfo object instead of just using Point
+    BoundaryInfo boundaryInfo = new BoundaryInfo(boundaryPoint);
+    confirmedBoundaries.put(direction, boundaryInfo);
 
-      if (direction != null) {
-        // Use existing recordBoundary method which handles all the boundary logic
-        recordBoundary(direction, currentPos);
-        logger.info("Boundary failure handled in direction: " + direction);
-      }
-    } catch (Exception e) {
-      logger.severe("Error in handleBoundaryFailure: " + e.getMessage());
+    if (DEBUG) {
+      logger.info(
+        String.format(
+          "Recorded boundary plane at %s in direction %s (one step beyond current position %s)",
+          boundaryPoint,
+          direction,
+          currentPos
+        )
+      );
     }
   }
 
@@ -1416,5 +1472,25 @@ public class LocalMap {
   // Track attempted moves
   public void setLastAttemptedMove(Point target) {
     this.lastAttemptedMove = target;
+  }
+
+  // Add this method to help with debugging
+  public void logBoundaryState() {
+    if (DEBUG) {
+      Point currentPos = getCurrentPosition();
+      logger.info(
+        String.format(
+          "Current position: %s, Boundaries: %s",
+          currentPos,
+          confirmedBoundaries
+            .entrySet()
+            .stream()
+            .map(
+              e -> String.format("%s at %s", e.getKey(), e.getValue().position)
+            )
+            .collect(Collectors.joining(", "))
+        )
+      );
+    }
   }
 }

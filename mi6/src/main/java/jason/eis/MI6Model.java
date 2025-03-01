@@ -208,7 +208,7 @@ public class MI6Model {
     this.movingToDispenser = new ConcurrentHashMap<>();
     this.lastProcessedTime = new ConcurrentHashMap<>();
 
-    LocalMap.DEBUG = true;
+    LocalMap.DEBUG = false;
 
     this.randomMovement = new RandomMovement();
     this.plannedMovement = new PlannedMovement();
