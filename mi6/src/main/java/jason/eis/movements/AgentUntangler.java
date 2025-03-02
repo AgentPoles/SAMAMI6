@@ -24,7 +24,7 @@ public class AgentUntangler {
 
   private static final Random RANDOM = new Random();
   private static final int MIN_WAIT = 200;
-  private static final int MAX_WAIT = 100;
+  private static final int MAX_WAIT = 1000;
 
   private static class UntangleState {
     Point position;
