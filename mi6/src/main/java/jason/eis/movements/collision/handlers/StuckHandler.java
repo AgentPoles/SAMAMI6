@@ -8,8 +8,12 @@ import java.util.*;
 
 public class StuckHandler {
   private final Random random = new Random();
-  private static final int AGENT_PROXIMITY_RANGE = 3;
+  private static final int AGENT_PROXIMITY_RANGE = 1;
   private static final double DIRECTION_SCORE_THRESHOLD = 0.7;
+  private static final int YIELD_THRESHOLD = 3;
+  private static final long YIELD_DURATION = 1000;
+  private long lastYieldTime = 0;
+  private int stuckCount = 0;
 
   private double getDistance(Point p1, Point p2) {
     return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
@@ -48,9 +52,11 @@ public class StuckHandler {
     List<String> availableDirections
   ) {
     if (!map.isStuck()) {
+      stuckCount = 0;
       return null;
     }
 
+    stuckCount++;
     Point currentPos = map.getCurrentPosition();
     int agentSize = map.getAgentSize();
     String blockAttachment = map.getBlockAttachment();
@@ -323,40 +329,65 @@ public class StuckHandler {
   ) {
     double score = 1.0;
 
-    // Penalize directions towards agents
+    // Count agents moving towards the same point
+    int agentsTowardsSamePoint = countAgentsTowardsSamePoint(
+      nextPos,
+      dynamicObstacles
+    );
+    if (agentsTowardsSamePoint > 0) {
+      score *= Math.pow(0.5, agentsTowardsSamePoint);
+    }
+
+    // Enhanced agent avoidance scoring
     for (Map.Entry<Point, ObstacleInfo> entry : dynamicObstacles.entrySet()) {
       Point agentPos = entry.getKey();
-      double distance = getDistance(nextPos, agentPos);
+      double currentDistance = getDistance(currentPos, agentPos);
+      double nextDistance = getDistance(nextPos, agentPos);
 
-      // Heavy penalty for getting closer to agents
-      if (distance < getDistance(currentPos, agentPos)) {
-        score *= 0.5;
+      // Stronger penalty for moving towards agents
+      if (nextDistance < currentDistance) {
+        score *= 0.4; // More aggressive penalty
       }
 
-      // Additional penalty based on proximity
-      if (distance <= AGENT_PROXIMITY_RANGE) {
-        score *= (distance / AGENT_PROXIMITY_RANGE);
+      // Progressive penalty based on proximity
+      if (nextDistance <= AGENT_PROXIMITY_RANGE) {
+        double proximityFactor = nextDistance / AGENT_PROXIMITY_RANGE;
+        score *= (0.5 + (0.5 * proximityFactor)); // More nuanced scaling
+      }
+
+      // Consider agent's predicted movement
+      Point predictedAgentPos = entry.getValue().predictPosition(1);
+      if (predictedAgentPos.equals(nextPos)) {
+        score *= 0.3; // Heavy penalty for potential collision
       }
     }
 
-    // Bonus for moving away from recent positions
+    // Enhanced history consideration
     List<MovementRecord> history = map.getMovementHistory();
     if (!history.isEmpty()) {
-      Point lastPos = history.get(0).position;
-      if (getDistance(nextPos, lastPos) > 1) {
-        score *= 1.2;
+      // Avoid recent positions more strongly
+      for (int i = 0; i < Math.min(3, history.size()); i++) {
+        Point histPos = history.get(i).position;
+        if (nextPos.equals(histPos)) {
+          score *= 0.7; // Penalty for revisiting recent positions
+        }
       }
     }
 
-    // Penalty for previously tried directions
-    if (map.getTriedDirections().contains(direction)) {
-      score *= 0.8;
+    // Consider yielding behavior
+    if (shouldYield()) {
+      score *= 0.3;
     }
 
-    // Bonus for perpendicular movement to last direction
+    // Enhanced penalties for tried directions
+    if (map.getTriedDirections().contains(direction)) {
+      score *= 0.6; // Stronger penalty for tried directions
+    }
+
+    // Bonus for perpendicular movement
     String lastDir = map.getLastDirection();
     if (lastDir != null && isPerpendicularDirection(direction, lastDir)) {
-      score *= 1.3;
+      score *= 1.5; // Increased bonus for perpendicular movement
     }
 
     return score;
@@ -371,5 +402,32 @@ public class StuckHandler {
       (dir1.equals("e") || dir1.equals("w")) &&
       (dir2.equals("n") || dir2.equals("s"))
     );
+  }
+
+  private boolean shouldYield() {
+    long currentTime = System.currentTimeMillis();
+    if (currentTime - lastYieldTime < YIELD_DURATION) {
+      return true;
+    }
+    if (stuckCount >= YIELD_THRESHOLD) {
+      lastYieldTime = currentTime;
+      stuckCount = 0;
+      return true;
+    }
+    return false;
+  }
+
+  private int countAgentsTowardsSamePoint(
+    Point targetPoint,
+    Map<Point, ObstacleInfo> dynamicObstacles
+  ) {
+    int count = 0;
+    for (ObstacleInfo obstacle : dynamicObstacles.values()) {
+      Point predictedPos = obstacle.predictPosition(1);
+      if (predictedPos.equals(targetPoint)) {
+        count++;
+      }
+    }
+    return count;
   }
 }

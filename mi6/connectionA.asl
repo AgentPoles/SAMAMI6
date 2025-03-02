@@ -23,28 +23,34 @@
         helpermodels.AddMovementFailure(failed_path, Dir);
     } elif (R == success) {
         .print("Move succeeded in direction: ", Dir);
-    }.
+    }
+    .
 
-+step(X):task(TaskID,_,_,[req(0,1,Type)]) & attached(0,1) & goal(0,0) <- submit(TaskID).
++step(X):task(TaskID,_,_,[req(0,1,Type)]) & attached(0,1) & goal(0,0) <- submit(TaskID); -carryingBlock.
 
 //rotating the block
-+step(X): goal(0,0) & attached(1,0) <-  rotate(cw).
-+step(X): goal(0,0) & attached(-1,0) <- rotate(ccw).
-+step(X): goal(0,0) & attached(0,-1) <- rotate(cw).
++step(X): goal(0,0) & attached(1,0) & carryingBlock  <-  rotate(cw).
++step(X): goal(0,0) & attached(-1,0) & carryingBlock <- rotate(ccw).
++step(X): goal(0,0) & attached(0,-1) & carryingBlock <- rotate(cw).
 
-+step(X) : true & attached(0,1) <- !move_random(goal,2,s).
-+step(X) : true & attached(0,-1) <- !move_random(goal,2,n).
-+step(X) : true & attached(1,0) <- !move_random(goal,2,e).
-+step(X) : true & attached(-1,0) <- !move_random(goal,2,w).
++step(X) : true & attached(0,1) & carryingBlock <- !move_random(goal,2,s).
++step(X) : true & attached(0,-1) & carryingBlock <- !move_random(goal,2,n).
++step(X) : true & attached(1,0) & carryingBlock <- !move_random(goal,2,e).
++step(X) : true & attached(-1,0) & carryingBlock <- !move_random(goal,2,w).
+
++step(X) : attached(0,1) & not carryingBlock <- detach(e).
++step(X) : attached(0,-1) & not carryingBlock <- detach(s).
++step(X) : attached(1,0) & not carryingBlock <- detach(w).
++step(X) : attached(-1,0) & not carryingBlock <- detach(n).
 
 //attaching blocks
-+step(X) :  not attached(_,_) & thing(1,0,dispenser,_) & thing(1,0,block,_) <- attach(e).
-+step(X) :  not attached(_,_) & thing(0,1,dispenser,_) & thing(0,1,block,_) <- attach(s).
-+step(X) :  not attached(_,_) & thing(-1,0,dispenser,_) & thing(-1,0,block,_) <- attach(w).
-+step(X) :  not attached(_,_) & thing(0,-1,dispenser,_) & thing(0,-1,block,_) <- attach(n).
++step(X) :  not attached(_,_) & thing(1,0,dispenser,_) & thing(1,0,block,_) <- +carryingBlock; attach(e).
++step(X) :  not attached(_,_) & thing(0,1,dispenser,_) & thing(0,1,block,_) <- +carryingBlock; attach(s).
++step(X) :  not attached(_,_) & thing(-1,0,dispenser,_) & thing(-1,0,block,_) <- +carryingBlock; attach(w).
++step(X) :  not attached(_,_) & thing(0,-1,dispenser,_) & thing(0,-1,block,_) <- +carryingBlock; attach(n).
 
 //requesting blocks
-+step(X) : thing(1,0,dispenser,_) & not attached(_,_) <- request(e).
++step(X) : thing(1,0,dispenser,_) & not attached(_,_) <- request(e).    
 +step(X) : thing(0,1,dispenser,_) & not attached(_,_) <- request(s).
 +step(X) : thing(-1,0,dispenser,_) & not attached(_,_) <- request(w).
 +step(X) : thing(0,-1,dispenser,_) & not attached(_,_) <- request(n).

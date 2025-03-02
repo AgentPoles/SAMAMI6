@@ -23,11 +23,13 @@ public class AgentCollisionHandler {
   private final StuckHandler stuckHandler;
   private final OscillationHandler oscillationHandler;
   private final ForcedDirectionChange forcedDirectionHandler;
+  private final AgentUntangler untangler;
 
   public AgentCollisionHandler() {
     this.stuckHandler = new StuckHandler();
     this.oscillationHandler = new OscillationHandler();
     this.forcedDirectionHandler = new ForcedDirectionChange();
+    this.untangler = new AgentUntangler();
   }
 
   /**
@@ -63,7 +65,22 @@ public class AgentCollisionHandler {
         );
       }
 
-      // Check for forced direction change first
+      // Try untangling first (highest priority for agent-agent conflicts)
+      String untangleDirection = untangler.untangle(agentId, map);
+      if (untangleDirection != null) {
+        if (DEBUG) {
+          logger.info(
+            String.format(
+              "Untangling agent %s with direction %s",
+              agentId,
+              untangleDirection
+            )
+          );
+        }
+        return new CollisionResolution(untangleDirection, "UNTANGLE");
+      }
+
+      // Check for forced direction change
       CollisionResolution forcedChange = forcedDirectionHandler.checkCollision(
         agentId,
         currentPos,

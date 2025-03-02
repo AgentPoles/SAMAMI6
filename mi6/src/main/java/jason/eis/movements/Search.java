@@ -222,18 +222,10 @@ public class Search {
       if (direction == null) break;
 
       Point next = getNextPoint(current, direction);
+
       if (
         !obstacleManager
-          .filterDirections(
-            "search",
-            Collections.singletonList(direction),
-            map,
-            current,
-            agentSize,
-            blockDirection,
-            null,
-            null
-          )
+          .filterDirections("search", map, Collections.singletonList(direction))
           .contains(direction)
       ) {
         break;
@@ -427,13 +419,8 @@ public class Search {
 
     List<String> validDirs = obstacleManager.filterDirections(
       "search",
-      possibleDirs,
       map,
-      current,
-      agentSize,
-      blockDirection,
-      null,
-      null
+      possibleDirs
     );
 
     return validDirs.isEmpty() ? null : validDirs.get(0);

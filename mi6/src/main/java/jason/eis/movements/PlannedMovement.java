@@ -466,29 +466,11 @@ public class PlannedMovement implements MovementStrategy {
     try {
       List<String> directions = Arrays.asList("n", "s", "e", "w");
 
-      // Apply boundary constraints
-      directions =
-        boundaryManager.filterDirections(
-          agName,
-          directions,
-          map,
-          currentPos,
-          state.targetPosition,
-          state.getCurrentStep()
-        );
+      // Apply boundary constraints first
+      directions = boundaryManager.filterDirections(agName, directions, map);
 
-      // Apply obstacle constraints
-      directions =
-        obstacleManager.filterDirections(
-          agName,
-          directions,
-          map,
-          currentPos,
-          size,
-          blockDirection,
-          state.targetPosition,
-          state.getCurrentStep()
-        );
+      // Then apply obstacle constraints
+      directions = obstacleManager.filterDirections(agName, map, directions);
 
       debug(
         "[%s] Valid directions after filtering: %s",
@@ -518,6 +500,7 @@ public class PlannedMovement implements MovementStrategy {
     List<String> availableDirections
   ) {
     try {
+      // First check if we need to handle any collisions
       CollisionResolution resolution = collisionHandler.resolveCollision(
         agName,
         currentPos,
@@ -537,11 +520,13 @@ public class PlannedMovement implements MovementStrategy {
           resolution.getReason()
         );
 
+        // Clear planned path if we're stuck
         if ("STUCK".equals(resolution.getReason())) {
           state.plannedPath.clear();
           debug("[%s] Clearing planned path due to STUCK state", agName);
         }
 
+        // Handle the deviation
         handleDeviation(
           state,
           direction,
@@ -552,6 +537,7 @@ public class PlannedMovement implements MovementStrategy {
         );
         return direction;
       }
+
       return null;
     } catch (Exception e) {
       logger.warning(
