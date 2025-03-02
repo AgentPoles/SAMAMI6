@@ -16,8 +16,8 @@ public class AgentCollisionHandler {
   private static final boolean DEBUG = true;
 
   // Constants for collision detection
-  private static final int AWARENESS_ZONE = 2;
-  private static final double CRITICAL_DISTANCE = 1.5;
+  private static final int AWARENESS_ZONE = 1;
+  private static final double CRITICAL_DISTANCE = 1;
 
   // Handlers
   private final StuckHandler stuckHandler;

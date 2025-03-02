@@ -33,15 +33,16 @@
 +step(X): goal(0,0) & attached(-1,0) & carryingBlock <- rotate(ccw).
 +step(X): goal(0,0) & attached(0,-1) & carryingBlock <- rotate(cw).
 
++step(X) : attached(0,1) & not carryingBlock <- detach(e).
++step(X) : attached(0,-1) & not carryingBlock <- detach(s).
++step(X) : attached(1,0) & not carryingBlock <- detach(w).
++step(X) : attached(-1,0) & not carryingBlock <- detach(n).
+
 +step(X) : true & attached(0,1) & carryingBlock <- !move_random(goal,2,s).
 +step(X) : true & attached(0,-1) & carryingBlock <- !move_random(goal,2,n).
 +step(X) : true & attached(1,0) & carryingBlock <- !move_random(goal,2,e).
 +step(X) : true & attached(-1,0) & carryingBlock <- !move_random(goal,2,w).
 
-+step(X) : attached(0,1) & not carryingBlock <- detach(e).
-+step(X) : attached(0,-1) & not carryingBlock <- detach(s).
-+step(X) : attached(1,0) & not carryingBlock <- detach(w).
-+step(X) : attached(-1,0) & not carryingBlock <- detach(n).
 
 //attaching blocks
 +step(X) :  not attached(_,_) & thing(1,0,dispenser,_) & thing(1,0,block,_) <- +carryingBlock; attach(e).

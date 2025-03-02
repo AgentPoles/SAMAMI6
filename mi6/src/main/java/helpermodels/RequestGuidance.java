@@ -107,13 +107,17 @@ public class RequestGuidance extends DefaultInternalAction {
         )
         : null;
 
-      // Get current position and map with null checks
+      // Get and validate agent map
       final LocalMap agentMap = model.getAgentMap(agName);
       if (agentMap == null) {
         logger.warning(String.format("[%s] Agent map is null", agName));
         return handleRandomMovement(agName, un, terms[3]);
       }
 
+      // Update agent state in map
+      agentMap.updateAgentState(size, blockDirection);
+
+      // Get current position with null check
       final Point currentPos = agentMap.getCurrentPosition();
       if (currentPos == null) {
         logger.warning(String.format("[%s] Current position is null", agName));
@@ -159,7 +163,7 @@ public class RequestGuidance extends DefaultInternalAction {
               );
               Point target = plannedMovement.findNearestTarget(
                 agentMap,
-                currentPos,
+                agentMap.getCurrentPosition(),
                 targetType,
                 size,
                 blockDirection
@@ -169,7 +173,7 @@ public class RequestGuidance extends DefaultInternalAction {
 
               return plannedMovement.calculatePath(
                 agentMap,
-                currentPos,
+                agentMap.getCurrentPosition(),
                 target,
                 targetType,
                 size,

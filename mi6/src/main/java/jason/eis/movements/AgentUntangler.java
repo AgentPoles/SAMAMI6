@@ -14,12 +14,17 @@ public class AgentUntangler {
   private static final boolean DEBUG = false;
 
   // Constants for quick decisions
-  private static final int CRITICAL_DISTANCE = 1;
+  private static final int CRITICAL_DISTANCE = 2;
   private static final int EMERGENCY_DISTANCE = 1;
-  private static final int SAFE_DISTANCE = 3;
+  private static final int SAFE_DISTANCE = 2;
+  private static final double OSCILLATION_TIME_THRESHOLD = 2000; // 2 seconds
 
   // Fast lookup for agent states
   private final Map<String, UntangleState> agentStates = new ConcurrentHashMap<>();
+
+  private static final Random RANDOM = new Random();
+  private static final int MIN_WAIT = 200;
+  private static final int MAX_WAIT = 100;
 
   private static class UntangleState {
     Point position;
@@ -54,26 +59,36 @@ public class AgentUntangler {
       Point currentPos = map.getCurrentPosition();
       if (currentPos == null) return null;
 
-      // Quick check if untangling is needed
+      // Check if untangling is needed
       if (!needsUntangling(agentId, currentPos, map)) {
         return null;
       }
 
-      // Update agent state
-      UntangleState state = agentStates.computeIfAbsent(
-        agentId,
-        k -> new UntangleState()
-      );
-      updateState(state, currentPos, map);
-
-      // Emergency resolution for critical situations
-      if (state.isEmergency || isEmergencySituation(currentPos, map)) {
-        state.markEmergency();
-        return resolveEmergency(state, map);
+      // Add random wait when agents are too close
+      try {
+        int waitTime = MIN_WAIT + RANDOM.nextInt(MAX_WAIT - MIN_WAIT);
+        Thread.sleep(waitTime);
+        if (DEBUG) {
+          logger.info(
+            "Agent " +
+            agentId +
+            " waiting for " +
+            waitTime +
+            "ms to avoid collision"
+          );
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
       }
 
-      // Standard untangling
-      return calculateUntangleMove(state, map);
+      // After waiting, check if the situation resolved itself
+      if (!needsUntangling(agentId, currentPos, map)) {
+        return null;
+      }
+
+      // If we still need to untangle after waiting, return the current direction
+      // This allows the agent to continue its planned path
+      return map.getLastDirection();
     } catch (Exception e) {
       logger.warning("Error in untangling: " + e.getMessage());
       return null;
@@ -125,18 +140,82 @@ public class AgentUntangler {
   }
 
   private String resolveEmergency(UntangleState state, LocalMap map) {
-    // Find the safest escape direction
+    // Get all available directions
+    List<String> availableDirections = getAvailableDirections(
+      state.position,
+      map
+    );
+    if (availableDirections.isEmpty()) return null;
+
+    // Score each direction based on multiple factors
     Map<String, Double> directionScores = new HashMap<>();
 
-    for (String dir : Arrays.asList("n", "s", "e", "w")) {
-      Point nextPos = calculateNextPosition(state.position, dir);
-      if (!isValidMove(nextPos, map)) continue;
+    for (String direction : availableDirections) {
+      Point nextPos = calculateNextPosition(state.position, direction);
+      double score = 0.0;
 
-      double score = scoreEmergencyMove(nextPos, map);
-      directionScores.put(dir, score);
+      // Avoid recent directions that led to oscillation
+      if (state.recentInteractions.contains(direction)) {
+        continue;
+      }
+
+      // Prefer directions away from other agents
+      score += getAgentDistanceScore(nextPos, map) * 2.0;
+
+      // Prefer directions with more open space
+      score += getOpenSpaceScore(nextPos, map) * 1.5;
+
+      // Penalize directions that lead to corners or walls
+      score -= getTrappedScore(nextPos, map);
+
+      directionScores.put(direction, score);
     }
 
-    return getBestDirection(directionScores);
+    // Select best direction
+    return selectBestDirection(directionScores);
+  }
+
+  private double getAgentDistanceScore(Point pos, LocalMap map) {
+    double minDistance = Double.MAX_VALUE;
+    for (Point agentPos : map.getDynamicObstaclePositions()) {
+      double distance = calculateDistance(pos, agentPos);
+      minDistance = Math.min(minDistance, distance);
+    }
+    return Math.min(1.0, minDistance / SAFE_DISTANCE);
+  }
+
+  private double getOpenSpaceScore(Point pos, LocalMap map) {
+    int openSpaces = 0;
+    for (int dx = -1; dx <= 1; dx++) {
+      for (int dy = -1; dy <= 1; dy++) {
+        Point checkPos = new Point(pos.x + dx, pos.y + dy);
+        if (!map.hasObstacle(checkPos)) {
+          openSpaces++;
+        }
+      }
+    }
+    return openSpaces / 9.0;
+  }
+
+  private double getTrappedScore(Point pos, LocalMap map) {
+    int blockedDirections = 0;
+    for (String dir : Arrays.asList("n", "s", "e", "w")) {
+      Point checkPos = calculateNextPosition(pos, dir);
+      if (map.hasObstacle(checkPos)) {
+        blockedDirections++;
+      }
+    }
+    return blockedDirections / 4.0;
+  }
+
+  private String selectBestDirection(Map<String, Double> scores) {
+    if (scores.isEmpty()) return null;
+    return scores
+      .entrySet()
+      .stream()
+      .max(Map.Entry.comparingByValue())
+      .map(Map.Entry::getKey)
+      .orElse(null);
   }
 
   private String calculateUntangleMove(UntangleState state, LocalMap map) {
@@ -151,23 +230,6 @@ public class AgentUntangler {
     }
 
     return getBestDirection(directionScores);
-  }
-
-  private double scoreEmergencyMove(Point nextPos, LocalMap map) {
-    double score = 100.0; // Base score
-    Map<Point, ObstacleInfo> obstacles = map.getDynamicObstacles();
-
-    // Heavily penalize moves close to other agents
-    for (Point otherPos : obstacles.keySet()) {
-      if (otherPos.equals(nextPos)) {
-        return Double.NEGATIVE_INFINITY;
-      }
-
-      int distance = getManhattanDistance(nextPos, otherPos);
-      score -= (SAFE_DISTANCE - distance) * 20;
-    }
-
-    return score;
   }
 
   private double scoreUntangleMove(
@@ -232,5 +294,22 @@ public class AgentUntangler {
       default:
         return current;
     }
+  }
+
+  private List<String> getAvailableDirections(Point pos, LocalMap map) {
+    List<String> availableDirections = new ArrayList<>();
+    for (String dir : Arrays.asList("n", "s", "e", "w")) {
+      Point nextPos = calculateNextPosition(pos, dir);
+      if (isValidMove(nextPos, map)) {
+        availableDirections.add(dir);
+      }
+    }
+    return availableDirections;
+  }
+
+  private double calculateDistance(Point p1, Point p2) {
+    int dx = p1.x - p2.x;
+    int dy = p1.y - p2.y;
+    return Math.sqrt(dx * dx + dy * dy);
   }
 }
