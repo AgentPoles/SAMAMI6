@@ -5,99 +5,70 @@ import jason.eis.Point;
 import java.util.*;
 import java.util.logging.Logger;
 
-public class ForcedDirectionChange implements CollisionResolver {
+public class ForcedDirectionChange {
   private static final Logger logger = Logger.getLogger(
     ForcedDirectionChange.class.getName()
   );
   private static final boolean DEBUG = false;
   private static final int DIRECTION_CHANGE_THRESHOLD = 7;
+  private static final int MAX_TRIES = 4; // Maximum number of different directions to try
 
-  // Track consecutive moves in the same direction for each agent
-  private final Map<String, DirectionState> agentDirections = new HashMap<>();
-
-  private static class DirectionState {
-    String currentDirection;
-    int consecutiveMoves;
-
-    DirectionState(String direction) {
-      this.currentDirection = direction;
-      this.consecutiveMoves = 1;
-    }
-
-    void updateDirection(String newDirection) {
-      if (newDirection.equals(currentDirection)) {
-        consecutiveMoves++;
-      } else {
-        currentDirection = newDirection;
-        consecutiveMoves = 1;
-      }
-    }
-
-    boolean needsDirectionChange() {
-      return consecutiveMoves >= DIRECTION_CHANGE_THRESHOLD;
-    }
-  }
-
-  @Override
   public CollisionResolution checkCollision(
-    String agentName,
+    String agentId,
     Point currentPos,
-    String plannedDirection,
+    String intendedDirection,
     LocalMap map,
-    int agentSize,
-    String blockDirection,
+    int size,
+    String blockAttachment,
     List<String> availableDirections
   ) {
     try {
-      if (
-        !isValidInput(
-          agentName,
-          currentPos,
-          plannedDirection,
-          availableDirections
-        )
-      ) {
+      String lastDirection = map.getLastDirection();
+      if (lastDirection == null) {
         return null;
       }
 
-      // Update direction state
-      DirectionState state = agentDirections.computeIfAbsent(
-        agentName,
-        k -> new DirectionState(plannedDirection)
-      );
-
-      if (plannedDirection != null) {
-        state.updateDirection(plannedDirection);
+      // Check if we should start forced direction change
+      if (
+        map.getSameDirectionCount() >= DIRECTION_CHANGE_THRESHOLD &&
+        !map.isWatchingForcedChange()
+      ) {
+        debug("Starting forced direction change for agent %s", agentId);
+        String oppositeDir = getOppositeDirection(lastDirection);
+        map.startWatchingForcedChange();
+        map.incrementForcedDirectionTry(oppositeDir);
+        return new CollisionResolution(oppositeDir, "FORCED_CHANGE");
       }
 
-      // Check if we need to force a direction change
-      if (state.needsDirectionChange()) {
-        debug(
-          "[%s] Forcing direction change after %d consecutive moves in direction %s",
-          agentName,
-          state.consecutiveMoves,
-          state.currentDirection
-        );
-
-        String oppositeDirection = getOppositeDirection(state.currentDirection);
-
-        // Reset the state after forcing a change
-        state.currentDirection = oppositeDirection;
-        state.consecutiveMoves = 1;
-
-        // Only return the opposite direction if it's available
-        if (availableDirections.contains(oppositeDirection)) {
-          return new CollisionResolution(oppositeDirection, "FORCED_CHANGE");
+      // If we're watching, continue trying until success or exhaustion
+      if (map.isWatchingForcedChange()) {
+        // If we've tried too many times, give up
+        if (map.getForcedDirectionTryCount() >= MAX_TRIES) {
+          debug(
+            "Giving up on forced direction change after %d attempts",
+            MAX_TRIES
+          );
+          map.stopWatchingForcedChange();
+          return null;
         }
 
-        // If opposite direction isn't available, try perpendicular directions
-        List<String> perpendicularDirs = getPerpendicularDirections(
-          state.currentDirection
-        );
-        for (String dir : perpendicularDirs) {
-          if (availableDirections.contains(dir)) {
-            return new CollisionResolution(dir, "FORCED_CHANGE");
-          }
+        // Try a new direction we haven't tried yet
+        List<String> untried = new ArrayList<>(availableDirections);
+        untried.removeAll(map.getTriedForcedDirections());
+        untried.remove(lastDirection); // Don't try the direction we're trying to avoid
+
+        if (!untried.isEmpty()) {
+          String newDirection = untried.get(
+            new Random().nextInt(untried.size())
+          );
+          debug("Trying new direction %s for forced change", newDirection);
+          map.incrementForcedDirectionTry(newDirection);
+          return new CollisionResolution(newDirection, "FORCED_CHANGE");
+        } else {
+          // No more directions to try
+          debug("No more directions to try for forced change");
+          map.stopWatchingForcedChange();
+          return null;
         }
       }
 
@@ -106,20 +77,6 @@ public class ForcedDirectionChange implements CollisionResolver {
       logger.warning("Error in ForcedDirectionChange: " + e.getMessage());
       return null;
     }
-  }
-
-  private boolean isValidInput(
-    String agentName,
-    Point currentPos,
-    String plannedDirection,
-    List<String> availableDirections
-  ) {
-    return (
-      agentName != null &&
-      currentPos != null &&
-      availableDirections != null &&
-      !availableDirections.isEmpty()
-    );
   }
 
   private String getOppositeDirection(String direction) {
@@ -138,30 +95,9 @@ public class ForcedDirectionChange implements CollisionResolver {
     }
   }
 
-  private List<String> getPerpendicularDirections(String direction) {
-    if (direction == null) return Collections.emptyList();
-    switch (direction) {
-      case "n":
-      case "s":
-        return Arrays.asList("e", "w");
-      case "e":
-      case "w":
-        return Arrays.asList("n", "s");
-      default:
-        return Collections.emptyList();
-    }
-  }
-
   private void debug(String format, Object... args) {
     if (DEBUG) {
       logger.fine(String.format(format, args));
-    }
-  }
-
-  // Method to clear state for an agent (useful when agent reaches target or path is cleared)
-  public void clearAgentState(String agentName) {
-    if (agentName != null) {
-      agentDirections.remove(agentName);
     }
   }
 }

@@ -3,6 +3,7 @@ package jason.eis.movements;
 import jason.eis.LocalMap;
 import jason.eis.Point;
 import jason.eis.movements.collision.CollisionResolution;
+import jason.eis.movements.collision.ForcedDirectionChange;
 import jason.eis.movements.collision.data.*;
 import jason.eis.movements.collision.handlers.*;
 import java.util.*;
@@ -21,10 +22,12 @@ public class AgentCollisionHandler {
   // Handlers
   private final StuckHandler stuckHandler;
   private final OscillationHandler oscillationHandler;
+  private final ForcedDirectionChange forcedDirectionHandler;
 
   public AgentCollisionHandler() {
     this.stuckHandler = new StuckHandler();
     this.oscillationHandler = new OscillationHandler();
+    this.forcedDirectionHandler = new ForcedDirectionChange();
   }
 
   /**
@@ -60,7 +63,31 @@ public class AgentCollisionHandler {
         );
       }
 
-      // First check for stuck condition (highest priority)
+      // Check for forced direction change first
+      CollisionResolution forcedChange = forcedDirectionHandler.checkCollision(
+        agentId,
+        currentPos,
+        intendedDirection,
+        map,
+        size,
+        blockAttachment,
+        availableDirections
+      );
+
+      if (forcedChange != null) {
+        if (DEBUG) {
+          logger.info(
+            String.format(
+              "Forced direction change for agent %s, new direction: %s",
+              agentId,
+              forcedChange.getDirection()
+            )
+          );
+        }
+        return forcedChange;
+      }
+
+      // Check for stuck condition
       if (map.isStuck()) {
         String stuckResolution = stuckHandler.resolveStuck(
           agentId,
@@ -72,7 +99,7 @@ public class AgentCollisionHandler {
         }
       }
 
-      // Then check for oscillation
+      // Check for oscillation
       String oscillationResolution = oscillationHandler.resolveOscillation(
         map,
         currentPos,
@@ -93,7 +120,6 @@ public class AgentCollisionHandler {
         return new CollisionResolution(oscillationResolution, "OSCILLATION");
       }
 
-      // No collision detected
       return null;
     } catch (Exception e) {
       logger.severe("Error in resolveCollision: " + e.getMessage());

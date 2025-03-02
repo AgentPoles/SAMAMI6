@@ -137,6 +137,12 @@ public class LocalMap {
   private final Map<Point, Double> heatMap = new ConcurrentHashMap<>();
   private long lastHeatDecay = System.currentTimeMillis();
 
+  // Add these fields with other state tracking variables
+  private boolean isWatchingForcedChange = false;
+  private int forcedDirectionTryCount = 0;
+  private Set<String> triedForcedDirections = new HashSet<>();
+  private static final int FORCED_DIRECTION_THRESHOLD = 7;
+
   // Update MovementRecord class to include timestamp
   public static class MovementRecord {
     public final Point position;
@@ -484,9 +490,6 @@ public class LocalMap {
         );
       }
 
-      // Record movement in our single movement history
-      recordMovement(newPosition, direction);
-
       // Track direction count
       if (direction.equals(lastDirection)) {
         sameDirectionCount++;
@@ -495,16 +498,24 @@ public class LocalMap {
         lastDirection = direction;
       }
 
+      // If we're watching for forced direction change, check if position actually changed
+      if (
+        isWatchingForcedChange &&
+        !newPosition.equals(lastPosition) &&
+        !direction.equals(lastDirection)
+      ) {
+        logger.info("Forced direction change success!");
+        // Position changed in a different direction - success!
+        stopWatchingForcedChange();
+      }
+
+      // Record movement in history
+      recordMovement(newPosition, direction);
+
       // Perform all checks every CHECK_INTERVAL steps
       movesSinceLastStuckCheck++;
       if (movesSinceLastStuckCheck >= CHECK_INTERVAL) {
         movesSinceLastStuckCheck = 0;
-
-        // Check for same-direction stuck
-        if (sameDirectionCount >= SAME_DIRECTION_THRESHOLD) {
-          incrementStuck(direction);
-          wasStuckLastCheck = true;
-        }
 
         // Check for position-based stuck
         if (isPositionStuck(newPosition)) {
@@ -1935,5 +1946,45 @@ public class LocalMap {
   // Add this method to get the entire heat map
   public Map<Point, Double> getHeatMap() {
     return new HashMap<>(heatMap);
+  }
+
+  // Add these methods for forced direction change tracking
+  public boolean isWatchingForcedChange() {
+    return isWatchingForcedChange;
+  }
+
+  public void startWatchingForcedChange() {
+    isWatchingForcedChange = false;
+    forcedDirectionTryCount = 0;
+    triedForcedDirections.clear();
+    isWatchingForcedChange = true;
+  }
+
+  public void stopWatchingForcedChange() {
+    isWatchingForcedChange = false;
+    forcedDirectionTryCount = 0;
+    triedForcedDirections.clear();
+  }
+
+  public int getForcedDirectionTryCount() {
+    return forcedDirectionTryCount;
+  }
+
+  public void incrementForcedDirectionTry(String direction) {
+    forcedDirectionTryCount++;
+    triedForcedDirections.add(direction);
+  }
+
+  public Set<String> getTriedForcedDirections() {
+    return new HashSet<>(triedForcedDirections);
+  }
+
+  public boolean shouldForcedDirectionChange() {
+    return sameDirectionCount >= FORCED_DIRECTION_THRESHOLD;
+  }
+
+  // Add this method to get the same direction count
+  public int getSameDirectionCount() {
+    return sameDirectionCount;
   }
 }
