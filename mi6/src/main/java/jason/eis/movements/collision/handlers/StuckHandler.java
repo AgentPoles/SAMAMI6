@@ -21,10 +21,8 @@ public class StuckHandler {
     String intendedDirection
   ) {
     MovementRecord lastMove = baseState.getLastMovement(agentId);
-
     // Record the new movement
     baseState.recordMovement(agentId, position, intendedDirection);
-
     // Check if position hasn't changed
     if (lastMove != null && lastMove.getPosition().equals(position)) {
       stuckState.incrementStuck(agentId, intendedDirection);

@@ -4,6 +4,7 @@ import jason.asSyntax.Atom;
 import jason.asSyntax.NumberTerm;
 import jason.asSyntax.Term;
 import jason.eis.movements.Search;
+import jason.eis.movements.collision.data.BaseCollisionState;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
@@ -67,6 +68,15 @@ public class LocalMap {
 
   // Add tracking maps
   private Point lastAttemptedMove = null;
+
+  // Add these fields at the top of the class
+  private final Map<Point, Integer> visitedCells = new ConcurrentHashMap<>();
+  private final Map<Point, Long> lastVisitTime = new ConcurrentHashMap<>();
+  private static final long VISIT_DECAY_TIME = 30000; // 30 seconds
+  private static final int MAX_VISIT_COUNT = 10;
+
+  // Add this field at the top of the class
+  private final BaseCollisionState collisionState;
 
   private static class DirectionMemory {
     private Point lastPosition;
@@ -340,6 +350,7 @@ public class LocalMap {
     this.typeIndex = new EnumMap<>(EntityType.class);
     this.entityRegistry = new ConcurrentHashMap<>();
     this.debugTrackingMap = DEBUG ? new ConcurrentHashMap<>() : null;
+    this.collisionState = new BaseCollisionState();
 
     // Initialize type index
     for (EntityType type : EntityType.values()) {
@@ -401,6 +412,27 @@ public class LocalMap {
           )
         );
       }
+
+      // Update visit tracking
+      visitedCells.merge(newPosition, 1, Integer::sum);
+      lastVisitTime.put(newPosition, System.currentTimeMillis());
+
+      // Clean up old visit records periodically
+      cleanupOldVisits();
+
+      // Update collision state
+      String agentId = Thread.currentThread().getName();
+      collisionState.recordMovement(agentId, newPosition, direction);
+
+      // Check if we're moving towards a boundary
+      if (confirmedBoundaries.containsKey(direction)) {
+        collisionState.incrementBoundaryAttempts(agentId);
+        collisionState.setOnBoundary(agentId, true);
+        collisionState.setLastBoundaryDirection(agentId, direction);
+      } else {
+        collisionState.setOnBoundary(agentId, false);
+      }
+
       currentPosition = newPosition;
     }
   }
@@ -1523,5 +1555,55 @@ public class LocalMap {
         )
       );
     }
+  }
+
+  // Add method to get exploration coverage
+  public double getExplorationCoverage() {
+    if (!boundsInitialized) return 0.0;
+
+    int totalArea =
+      (mapMaxBounds.x - mapMinBounds.x + 1) *
+      (mapMaxBounds.y - mapMinBounds.y + 1);
+    return totalArea > 0 ? (double) visitedCells.size() / totalArea : 0.0;
+  }
+
+  private void cleanupOldVisits() {
+    long currentTime = System.currentTimeMillis();
+    lastVisitTime
+      .entrySet()
+      .removeIf(entry -> currentTime - entry.getValue() > VISIT_DECAY_TIME);
+    visitedCells.keySet().removeIf(pos -> !lastVisitTime.containsKey(pos));
+  }
+
+  public Map<Point, Double> getVisitedHeatmap() {
+    Map<Point, Double> heatmap = new HashMap<>();
+    long currentTime = System.currentTimeMillis();
+
+    // Convert visit counts to heat values with time decay
+    for (Map.Entry<Point, Integer> entry : visitedCells.entrySet()) {
+      Point pos = entry.getKey();
+      int visits = entry.getValue();
+      long lastVisit = lastVisitTime.getOrDefault(pos, 0L);
+
+      // Calculate time decay factor (1.0 to 0.0)
+      double timeFactor = Math.max(
+        0.0,
+        1.0 - (double) (currentTime - lastVisit) / VISIT_DECAY_TIME
+      );
+
+      // Normalize visits to 0.0-1.0 range and apply time decay
+      double heat =
+        Math.min(1.0, (double) visits / MAX_VISIT_COUNT) * timeFactor;
+
+      if (heat > 0.0) {
+        heatmap.put(pos, heat);
+      }
+    }
+
+    return heatmap;
+  }
+
+  public boolean isExplored(Point pos) {
+    return visitedCells.containsKey(pos);
   }
 }

@@ -15,7 +15,7 @@ public class AgentCollisionHandler {
   private static final boolean DEBUG = true;
 
   // Constants for collision detection
-  private static final int AWARENESS_ZONE = 4;
+  private static final int AWARENESS_ZONE = 2;
   private static final double CRITICAL_DISTANCE = 1.5;
 
   // Shared states
@@ -307,5 +307,9 @@ public class AgentCollisionHandler {
   public void resetState(String agentId) {
     baseState.resetAgentState(agentId);
     stuckState.resetStuckState(agentId);
+  }
+
+  public BaseCollisionState getCollisionState() {
+    return baseState;
   }
 }

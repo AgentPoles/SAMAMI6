@@ -4,9 +4,13 @@ import eis.EnvironmentInterfaceStandard;
 import eis.iilang.*;
 import jason.asSyntax.*;
 import jason.eis.Point;
+import jason.eis.movements.AgentCollisionHandler;
+import jason.eis.movements.Exploration;
 import jason.eis.movements.PlannedMovement;
 import jason.eis.movements.RandomMovement;
 import jason.eis.movements.Search;
+import jason.eis.movements.collision.data.BaseCollisionState;
+import jason.eis.movements.collision.data.StuckState;
 import jason.environment.Environment;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -200,6 +204,30 @@ public class MI6Model {
 
   public MI6Model(EnvironmentInterfaceStandard ei) {
     this.ei = ei;
+
+    // Initialize movement components in correct order
+    BaseCollisionState collisionState = new BaseCollisionState();
+    StuckState stuckState = new StuckState();
+
+    // Create collision handler without parameters
+    AgentCollisionHandler collisionHandler = new AgentCollisionHandler();
+
+    // Create exploration with collision handler
+    Exploration exploration = new Exploration(
+      collisionHandler.getCollisionState()
+    );
+
+    // Initialize movement strategies
+    this.randomMovement =
+      new RandomMovement(
+        collisionState,
+        stuckState,
+        collisionHandler,
+        exploration
+      );
+    this.plannedMovement = new PlannedMovement();
+
+    // Initialize maps and caches
     this.agentMaps = new ConcurrentHashMap<>();
     this.agentMovement = new ConcurrentHashMap<>();
     this.agentZones = new ConcurrentHashMap<>();
@@ -209,10 +237,6 @@ public class MI6Model {
     this.lastProcessedTime = new ConcurrentHashMap<>();
 
     LocalMap.DEBUG = false;
-
-    this.randomMovement = new RandomMovement();
-    this.plannedMovement = new PlannedMovement();
-
     instance = this;
   }
 
@@ -998,6 +1022,8 @@ public class MI6Model {
 
     Search.TargetType searchType = convertTargetType(targetType);
     Point currentPos = map.getCurrentPosition();
+
+    // Use plannedMovement instead of map to find nearest target
     Point target = plannedMovement.findNearestTarget(
       map,
       currentPos,
