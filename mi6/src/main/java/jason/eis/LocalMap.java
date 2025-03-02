@@ -82,8 +82,8 @@ public class LocalMap {
 
   // Add this field at the top of the class
 
-  private static final int MOVEMENT_HISTORY_SIZE = 9;
-  private static final int MEMORY_SIZE = 5;
+  private static final int MOVEMENT_HISTORY_SIZE = 12;
+  private static final int MEMORY_SIZE = 12;
 
   // Core movement tracking
   private final Deque<MovementRecord> movementHistory = new LinkedList<>();
@@ -512,11 +512,11 @@ public class LocalMap {
       // Record movement in history
       recordMovement(newPosition, direction);
 
-      // Perform all checks every CHECK_INTERVAL steps
+      // Perform checks at different intervals
       movesSinceLastStuckCheck++;
-      if (movesSinceLastStuckCheck >= CHECK_INTERVAL) {
-        movesSinceLastStuckCheck = 0;
 
+      // Check for 2-step and 3-step patterns every 3 moves
+      if (movesSinceLastStuckCheck >= 3) {
         // Check for position-based stuck
         if (isPositionStuck(newPosition)) {
           incrementStuck(direction);
@@ -525,8 +525,19 @@ public class LocalMap {
           resetStuckState();
         }
 
-        // Check for oscillation pattern
-        if (detectPattern()) {
+        // Check for 2-step and 3-step patterns
+        if (detectShortPatterns()) {
+          patternCount++;
+          lastOscillationUpdateTime = System.currentTimeMillis();
+        }
+      }
+
+      // Check for 4-step patterns every 6 moves
+      if (movesSinceLastStuckCheck >= 6) {
+        movesSinceLastStuckCheck = 0;
+
+        // Check for 4-step patterns
+        if (detectLongPattern()) {
           patternCount++;
           lastOscillationUpdateTime = System.currentTimeMillis();
         } else {
@@ -1829,11 +1840,11 @@ public class LocalMap {
   }
 
   // Add oscillation tracking methods
-  public boolean detectPattern() {
+  private boolean detectShortPatterns() {
     List<MovementRecord> recent = new ArrayList<>(movementHistory);
     if (recent.size() < 4) return false;
 
-    oscillatingDirections.clear(); // Clear previous oscillating directions
+    oscillatingDirections.clear();
 
     // Two-step pattern check (back and forth)
     String lastDir = recent.get(0).direction;
@@ -1850,37 +1861,43 @@ public class LocalMap {
       List<String> middleThree = getDirections(recent, 3, 6);
       List<String> firstThree = getDirections(recent, 6, 9);
 
-      if (lastThree == null || middleThree == null || firstThree == null) {
-        return false;
-      }
-
-      if (lastThree.equals(middleThree) || lastThree.equals(firstThree)) {
-        oscillatingDirections.addAll(lastThree);
-        return true;
-      }
-      if (middleThree.equals(firstThree)) {
-        oscillatingDirections.addAll(middleThree);
-        return true;
+      if (lastThree != null && middleThree != null && firstThree != null) {
+        if (lastThree.equals(middleThree) || lastThree.equals(firstThree)) {
+          oscillatingDirections.addAll(lastThree);
+          return true;
+        }
+        if (middleThree.equals(firstThree)) {
+          oscillatingDirections.addAll(middleThree);
+          return true;
+        }
       }
     }
 
     return false;
   }
 
-  private boolean isOpposite(String dir1, String dir2) {
-    if (dir1 == null || dir2 == null) return false;
-    switch (dir1) {
-      case "n":
-        return dir2.equals("s");
-      case "s":
-        return dir2.equals("n");
-      case "e":
-        return dir2.equals("w");
-      case "w":
-        return dir2.equals("e");
-      default:
-        return false;
+  private boolean detectLongPattern() {
+    List<MovementRecord> recent = new ArrayList<>(movementHistory);
+    if (recent.size() < 12) return false;
+
+    // Four-step pattern check (ABAB pattern repeated 3 times)
+    List<String> lastFour = getDirections(recent, 0, 4);
+    List<String> middleFour = getDirections(recent, 4, 8);
+    List<String> firstFour = getDirections(recent, 8, 12);
+
+    if (lastFour != null && middleFour != null && firstFour != null) {
+      // Check if it's the same ABAB pattern repeated three times
+      if (
+        lastFour.equals(middleFour) &&
+        lastFour.equals(firstFour) &&
+        isAlternatingPattern(lastFour)
+      ) {
+        oscillatingDirections.addAll(lastFour);
+        return true;
+      }
     }
+
+    return false;
   }
 
   public boolean isOscillating() {
@@ -1986,5 +2003,30 @@ public class LocalMap {
   // Add this method to get the same direction count
   public int getSameDirectionCount() {
     return sameDirectionCount;
+  }
+
+  private boolean isOpposite(String dir1, String dir2) {
+    if (dir1 == null || dir2 == null) return false;
+    switch (dir1) {
+      case "n":
+        return dir2.equals("s");
+      case "s":
+        return dir2.equals("n");
+      case "e":
+        return dir2.equals("w");
+      case "w":
+        return dir2.equals("e");
+      default:
+        return false;
+    }
+  }
+
+  private boolean isAlternatingPattern(List<String> moves) {
+    if (moves.size() != 4) return false;
+    return (
+      moves.get(0).equals(moves.get(2)) &&
+      moves.get(1).equals(moves.get(3)) &&
+      !moves.get(0).equals(moves.get(1))
+    );
   }
 }
