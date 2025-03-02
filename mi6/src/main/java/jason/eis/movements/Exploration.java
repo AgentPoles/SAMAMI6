@@ -85,6 +85,7 @@ public class Exploration {
     STUCK, // Agent unable to make progress
     HIGH_TRAFFIC, // Multiple agents in same zone
     EXPLORATION_TIMEOUT, // Path too old or too long
+    OSCILLATION, // Oscillation detected
   }
 
   public static class PathResult {
@@ -366,12 +367,20 @@ public class Exploration {
     // Only adjust parameters if reason is not null
     if (reason != null) {
       switch (reason) {
+        case OSCILLATION:
+          // For oscillation, we want to quickly break the pattern
+          params.maxDepth = 8; // Shorter path to make quick decisions
+          params.unexploredWeight = 0.4; // Less focus on exploration
+          params.heatWeight = 0.4; // More focus on avoiding recent paths
+          params.distanceWeight = 0.2; // Some weight to distance
+          // Add high heat to oscillation area to force new path
+          addOscillationPenalty(current);
+          break;
         case PATH_BLOCKED:
           params.maxDepth = 14;
           params.unexploredWeight = 0.7;
           params.heatWeight = 0.2;
           params.distanceWeight = 0.1;
-          // Add extra heat to blocked area
           updateHeatInRadius(current);
           break;
         case STUCK:
@@ -739,6 +748,25 @@ public class Exploration {
           double heatValue = intensity * Math.exp(-distance / HEAT_RADIUS);
           heatMap.merge(p, heatValue, (old, new_) -> Math.min(1.0, old + new_));
         }
+      }
+    }
+  }
+
+  private void addOscillationPenalty(Point oscillationPoint) {
+    // Add very high heat to oscillation area to strongly discourage revisiting
+    for (int dx = -1; dx <= 1; dx++) {
+      for (int dy = -1; dy <= 1; dy++) {
+        Point p = new Point(oscillationPoint.x + dx, oscillationPoint.y + dy);
+        heatMap.put(p, INITIAL_HEAT * 3); // Triple the normal heat
+      }
+    }
+
+    // Also add moderate heat to a wider area
+    for (int dx = -3; dx <= 3; dx++) {
+      for (int dy = -3; dy <= 3; dy++) {
+        if (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) continue; // Skip inner area
+        Point p = new Point(oscillationPoint.x + dx, oscillationPoint.y + dy);
+        heatMap.merge(p, INITIAL_HEAT, Double::max);
       }
     }
   }

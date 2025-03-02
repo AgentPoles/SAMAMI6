@@ -16,4 +16,12 @@ public class CollisionResolution {
   public String getReason() {
     return reason;
   }
+
+  public boolean isOscillation() {
+    return "OSCILLATION".equals(reason);
+  }
+
+  public boolean isStuck() {
+    return "STUCK".equals(reason);
+  }
 }

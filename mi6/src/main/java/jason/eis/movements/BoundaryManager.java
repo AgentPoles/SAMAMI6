@@ -28,72 +28,129 @@ public class BoundaryManager {
     Point previousPos,
     String previousMove
   ) {
-    if (availableDirections.isEmpty()) {
-      return availableDirections;
-    }
-
-    // First try normal filtering
-    List<String> filteredDirections = availableDirections
-      .stream()
-      .filter(
-        dir -> {
-          Point next = calculateNextPosition(currentPos, dir);
-          boolean forbidden = map.isForbidden(next);
-
-          if (DEBUG && forbidden) {
-            logger.info(
-              String.format(
-                "FORBIDDEN MOVE - Direction %s to %s is forbidden",
-                dir,
-                next
-              )
-            );
-          }
-
-          return !forbidden;
-        }
-      )
-      .filter(dir -> !wouldHitBoundary(map, currentPos, dir))
-      .collect(Collectors.toList());
-
-    // If we have valid directions, return them
-    if (!filteredDirections.isEmpty()) {
-      return filteredDirections;
-    }
-
-    // If we're stuck (same position) and have a previous move
-    if (
-      previousPos != null &&
-      currentPos.equals(previousPos) &&
-      previousMove != null
-    ) {
-      logger.info(
-        "All directions filtered out and agent is stuck. Using optimistic filtering."
-      );
-
-      // Remove the previous move that got us stuck
-      List<String> optimisticDirections = new ArrayList<>(availableDirections);
-      optimisticDirections.remove(previousMove);
-
-      if (!optimisticDirections.isEmpty()) {
-        logger.info(
-          "Allowing potentially risky directions: " + optimisticDirections
-        );
-        return optimisticDirections;
+    try {
+      // Validate inputs
+      if (availableDirections == null) {
+        logger.severe("Available directions list is null");
+        return new ArrayList<>();
       }
-    }
+      if (map == null) {
+        logger.severe("Map is null");
+        return availableDirections;
+      }
+      if (currentPos == null) {
+        logger.severe("Current position is null");
+        return availableDirections;
+      }
 
-    // If all else fails, return all directions except previous move
-    logger.info(
-      "Falling back to all available directions except previous move"
-    );
-    List<String> fallbackDirections = new ArrayList<>(availableDirections);
-    if (previousMove != null) {
-      fallbackDirections.remove(previousMove);
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "Filtering directions - Current: %s, Previous: %s, PrevMove: %s, Available: %s",
+            currentPos,
+            previousPos,
+            previousMove,
+            availableDirections
+          )
+        );
+      }
+
+      // First try normal filtering
+      List<String> filteredDirections = availableDirections
+        .stream()
+        .filter(
+          dir -> {
+            try {
+              Point next = calculateNextPosition(currentPos, dir);
+              boolean forbidden = map.isForbidden(next);
+              boolean hitsBoundary = wouldHitBoundary(map, currentPos, dir);
+
+              if (DEBUG) {
+                logger.info(
+                  String.format(
+                    "Direction %s to %s - Forbidden: %b, Hits Boundary: %b",
+                    dir,
+                    next,
+                    forbidden,
+                    hitsBoundary
+                  )
+                );
+              }
+
+              return !forbidden && !hitsBoundary;
+            } catch (Exception e) {
+              logger.warning(
+                String.format(
+                  "Error checking direction %s: %s",
+                  dir,
+                  e.getMessage()
+                )
+              );
+              return false;
+            }
+          }
+        )
+        .collect(Collectors.toList());
+
+      if (!filteredDirections.isEmpty()) {
+        if (DEBUG) {
+          logger.info("Filtered directions: " + filteredDirections);
+        }
+        return filteredDirections;
+      }
+
+      // Handle stuck case
+      if (
+        previousPos != null &&
+        currentPos.equals(previousPos) &&
+        previousMove != null
+      ) {
+        if (DEBUG) {
+          logger.info(
+            String.format(
+              "Agent stuck at %s, removing previous move %s",
+              currentPos,
+              previousMove
+            )
+          );
+        }
+
+        List<String> optimisticDirections = new ArrayList<>(
+          availableDirections
+        );
+        optimisticDirections.remove(previousMove);
+
+        if (!optimisticDirections.isEmpty()) {
+          logger.info("Using optimistic directions: " + optimisticDirections);
+          return optimisticDirections;
+        }
+      }
+
+      // Fallback case
+      List<String> fallbackDirections = new ArrayList<>(availableDirections);
+      if (previousMove != null) {
+        fallbackDirections.remove(previousMove);
+      }
+
+      if (DEBUG) {
+        logger.info(
+          "Using fallback directions: " +
+          (
+            fallbackDirections.isEmpty()
+              ? availableDirections
+              : fallbackDirections
+          )
+        );
+      }
+
+      return fallbackDirections.isEmpty()
+        ? availableDirections
+        : fallbackDirections;
+    } catch (Exception e) {
+      logger.severe("Critical error in filterDirections: " + e.getMessage());
+      e.printStackTrace();
+      return availableDirections; // Return original list in case of critical error
     }
-    return fallbackDirections.isEmpty()
-      ? availableDirections
-      : fallbackDirections;
   }
 
   /**
@@ -104,38 +161,63 @@ public class BoundaryManager {
     Point currentPos,
     String direction
   ) {
-    Point nextPos = calculateNextPosition(currentPos, direction);
-    Map<String, Point> boundaries = map.getConfirmedBoundariesPositions();
+    try {
+      Point nextPos = calculateNextPosition(currentPos, direction);
+      Map<String, Point> boundaries = map.getConfirmedBoundariesPositions();
 
-    if (boundaries.isEmpty()) {
-      return false;
-    }
-
-    // Check if next position would hit any known boundary
-    for (Map.Entry<String, Point> entry : boundaries.entrySet()) {
-      Point boundaryPos = entry.getValue();
-      String boundaryDir = entry.getKey();
-
-      switch (boundaryDir) {
-        case "n":
-          if (nextPos.y <= boundaryPos.y) return true;
-          break;
-        case "s":
-          if (nextPos.y >= boundaryPos.y) return true;
-          break;
-        case "e":
-          if (nextPos.x >= boundaryPos.x) return true;
-          break;
-        case "w":
-          if (nextPos.x <= boundaryPos.x) return true;
-          break;
+      if (boundaries.isEmpty()) {
+        return false;
       }
-    }
 
-    return false;
+      for (Map.Entry<String, Point> entry : boundaries.entrySet()) {
+        Point boundaryPos = entry.getValue();
+        String boundaryDir = entry.getKey();
+
+        boolean hits = false;
+        switch (boundaryDir) {
+          case "n":
+            hits = nextPos.y <= boundaryPos.y;
+            break;
+          case "s":
+            hits = nextPos.y >= boundaryPos.y;
+            break;
+          case "e":
+            hits = nextPos.x >= boundaryPos.x;
+            break;
+          case "w":
+            hits = nextPos.x <= boundaryPos.x;
+            break;
+        }
+
+        if (hits && DEBUG) {
+          logger.info(
+            String.format(
+              "Hit boundary at %s moving %s (boundary: %s %s)",
+              nextPos,
+              direction,
+              boundaryDir,
+              boundaryPos
+            )
+          );
+        }
+
+        if (hits) return true;
+      }
+
+      return false;
+    } catch (Exception e) {
+      logger.warning("Error checking boundary collision: " + e.getMessage());
+      return true; // Safer to assume boundary hit on error
+    }
   }
 
   private Point calculateNextPosition(Point current, String direction) {
+    if (current == null || direction == null) {
+      throw new IllegalArgumentException(
+        "Current position or direction is null"
+      );
+    }
+
     switch (direction) {
       case "n":
         return new Point(current.x, current.y - 1);
@@ -146,7 +228,7 @@ public class BoundaryManager {
       case "w":
         return new Point(current.x - 1, current.y);
       default:
-        return current;
+        throw new IllegalArgumentException("Invalid direction: " + direction);
     }
   }
 }

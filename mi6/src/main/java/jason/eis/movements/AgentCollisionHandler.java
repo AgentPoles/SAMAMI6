@@ -6,8 +6,14 @@ import jason.eis.movements.collision.CollisionResolution;
 import jason.eis.movements.collision.data.*;
 import jason.eis.movements.collision.handlers.*;
 import java.util.*;
+import java.util.logging.Logger;
 
 public class AgentCollisionHandler {
+  private static final Logger logger = Logger.getLogger(
+    AgentCollisionHandler.class.getName()
+  );
+  private static final boolean DEBUG = true;
+
   // Constants for collision detection
   private static final int AWARENESS_ZONE = 4;
   private static final double CRITICAL_DISTANCE = 1.5;
@@ -18,11 +24,38 @@ public class AgentCollisionHandler {
 
   // Handlers
   private final StuckHandler stuckHandler;
+  private final OscillationHandler oscillationHandler;
+  private final Map<String, AgentState> agentStates;
 
   public AgentCollisionHandler() {
     this.baseState = new BaseCollisionState();
     this.stuckState = new StuckState();
     this.stuckHandler = new StuckHandler(baseState, stuckState);
+    this.oscillationHandler = new OscillationHandler();
+    this.agentStates = new HashMap<>();
+  }
+
+  private static class AgentState {
+    Point currentPos;
+    Point previousPos;
+    String lastDirection;
+    long lastMoveTime;
+    int size;
+
+    AgentState(Point pos, String direction, int size) {
+      this.currentPos = pos;
+      this.lastDirection = direction;
+      this.size = size;
+      this.lastMoveTime = System.currentTimeMillis();
+    }
+
+    void updateState(Point newPos, String direction, int newSize) {
+      this.previousPos = this.currentPos;
+      this.currentPos = newPos;
+      this.lastDirection = direction;
+      this.size = newSize;
+      this.lastMoveTime = System.currentTimeMillis();
+    }
   }
 
   /**
@@ -45,41 +78,98 @@ public class AgentCollisionHandler {
     String blockAttachment,
     List<String> availableDirections
   ) {
-    // Update states first
-    updateState(agentId, currentPos, intendedDirection, size, blockAttachment);
+    try {
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "Resolving collision for agent %s at %s, size %d, block %s",
+            agentId,
+            currentPos,
+            size,
+            blockAttachment
+          )
+        );
+      }
 
-    // Check if agent is stuck
-    if (stuckState.isStuck(agentId)) {
-      List<String> availableDirs = getAvailableDirections(
-        map,
+      // Update agent state
+      updateState(agentId, currentPos, intendedDirection, size);
+      AgentState state = agentStates.get(agentId);
+
+      // First check for stuck condition (highest priority)
+      if (isStuck(state)) {
+        String stuckResolution = stuckHandler.resolveStuck(
+          agentId,
+          map,
+          availableDirections
+        );
+        if (stuckResolution != null) {
+          return new CollisionResolution(stuckResolution, "STUCK");
+        }
+      }
+
+      // Then check for oscillation
+      String oscillationResolution = oscillationHandler.resolveOscillation(
+        agentId,
         currentPos,
+        intendedDirection,
+        availableDirections,
         size,
         blockAttachment
       );
-      String resolvedDirection = stuckHandler.resolveStuck(
-        agentId,
-        map,
-        availableDirs
-      );
-
-      if (resolvedDirection != null) {
-        return new CollisionResolution(resolvedDirection, "STUCK");
+      if (oscillationResolution != null) {
+        if (DEBUG) {
+          logger.info(
+            String.format(
+              "Oscillation detected for agent %s, resolving with direction %s",
+              agentId,
+              oscillationResolution
+            )
+          );
+        }
+        return new CollisionResolution(oscillationResolution, "OSCILLATION");
       }
-    }
 
-    // No collision detected
-    return null;
+      // No collision detected
+      return null;
+    } catch (Exception e) {
+      logger.severe("Error in resolveCollision: " + e.getMessage());
+      return null;
+    }
   }
 
   private void updateState(
     String agentId,
-    Point position,
-    String intendedDirection,
-    int size,
-    String blockAttachment
+    Point currentPos,
+    String direction,
+    int size
   ) {
-    baseState.updateAgentState(agentId, size, blockAttachment);
-    stuckHandler.updateState(agentId, position, intendedDirection);
+    AgentState state = agentStates.get(agentId);
+    if (state == null) {
+      state = new AgentState(currentPos, direction, size);
+      agentStates.put(agentId, state);
+    } else {
+      state.updateState(currentPos, direction, size);
+    }
+  }
+
+  private boolean isStuck(AgentState state) {
+    if (state == null || state.previousPos == null) {
+      return false;
+    }
+    return (
+      state.currentPos.equals(state.previousPos) &&
+      (System.currentTimeMillis() - state.lastMoveTime) > 1000
+    ); // 1 second threshold
+  }
+
+  // Helper method to clean up old states periodically
+  public void cleanup() {
+    long currentTime = System.currentTimeMillis();
+    agentStates
+      .entrySet()
+      .removeIf(
+        entry -> (currentTime - entry.getValue().lastMoveTime) > 10000 // 10 seconds
+      );
   }
 
   private List<String> getAvailableDirections(

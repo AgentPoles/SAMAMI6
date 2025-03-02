@@ -31,10 +31,10 @@
 +step(X) : true & attached(-1,0) <- !move_random(goal,2,w).
 
 //attaching blocks
-+step(X) :  thing(1,0,dispenser,_) & thing(1,0,block,_) <- attach(e).
-+step(X) :  thing(0,1,dispenser,_) & thing(0,1,block,_) <- attach(s).
-+step(X) :  thing(-1,0,dispenser,_) & thing(-1,0,block,_) <- attach(w).
-+step(X) :  thing(0,-1,dispenser,_) & thing(0,-1,block,_) <- attach(n).
++step(X) :  not attached(_,_) & thing(1,0,dispenser,_) & thing(1,0,block,_) <- attach(e).
++step(X) :  not attached(_,_) & thing(0,1,dispenser,_) & thing(0,1,block,_) <- attach(s).
++step(X) :  not attached(_,_) & thing(-1,0,dispenser,_) & thing(-1,0,block,_) <- attach(w).
++step(X) :  not attached(_,_) & thing(0,-1,dispenser,_) & thing(0,-1,block,_) <- attach(n).
 
 //requesting blocks
 +step(X) : thing(1,0,dispenser,_) & not attached(_,_) <- request(e).

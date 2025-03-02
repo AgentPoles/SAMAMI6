@@ -7,6 +7,10 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 public class ObstacleManager {
+  private static final Logger logger = Logger.getLogger(
+    ObstacleManager.class.getName()
+  );
+  private static final boolean DEBUG = true;
   private static final double BLOCK_BUFFER = 2.0; // Extra space around blocks
   private static final int CRITICAL_DISTANCE = 1;
 
@@ -14,20 +18,22 @@ public class ObstacleManager {
   private final Map<String, Point> directionOffsets;
   private final Map<Integer, Set<Point>> agentSizeCache;
 
-  private static final Logger logger = Logger.getLogger(
-    ObstacleManager.class.getName()
-  );
-
   public ObstacleManager() {
-    // Initialize direction offset cache
-    directionOffsets = new HashMap<>();
-    directionOffsets.put("n", new Point(0, -1));
-    directionOffsets.put("s", new Point(0, 1));
-    directionOffsets.put("e", new Point(1, 0));
-    directionOffsets.put("w", new Point(-1, 0));
+    try {
+      directionOffsets = new HashMap<>();
+      directionOffsets.put("n", new Point(0, -1));
+      directionOffsets.put("s", new Point(0, 1));
+      directionOffsets.put("e", new Point(1, 0));
+      directionOffsets.put("w", new Point(-1, 0));
 
-    // Initialize agent size cache
-    agentSizeCache = new HashMap<>();
+      agentSizeCache = new HashMap<>();
+      if (DEBUG) {
+        logger.info("ObstacleManager initialized successfully");
+      }
+    } catch (Exception e) {
+      logger.severe("Failed to initialize ObstacleManager: " + e.getMessage());
+      throw new RuntimeException("ObstacleManager initialization failed", e);
+    }
   }
 
   /**
@@ -42,56 +48,127 @@ public class ObstacleManager {
     Point previousPos,
     String previousMove
   ) {
-    if (availableDirections.isEmpty()) {
-      return availableDirections;
-    }
-
-    // First try normal filtering
-    List<String> filteredDirections = availableDirections
-      .stream()
-      .filter(
-        dir -> isDirectionSafe(map, currentPos, dir, size, blockDirection)
-      )
-      .collect(Collectors.toList());
-
-    // If we have valid directions, return them
-    if (!filteredDirections.isEmpty()) {
-      return filteredDirections;
-    }
-
-    // If we're stuck and have a previous move
-    if (
-      previousPos != null &&
-      currentPos.equals(previousPos) &&
-      previousMove != null
-    ) {
-      logger.info(
-        "All directions filtered out and agent is stuck. Using optimistic filtering."
-      );
-
-      // Remove the previous move that got us stuck
-      List<String> optimisticDirections = new ArrayList<>(availableDirections);
-      optimisticDirections.remove(previousMove);
-
-      if (!optimisticDirections.isEmpty()) {
-        logger.info(
-          "Allowing potentially risky directions: " + optimisticDirections
-        );
-        return optimisticDirections;
+    try {
+      // Validate inputs
+      if (availableDirections == null) {
+        logger.severe("Available directions list is null");
+        return new ArrayList<>();
       }
-    }
+      if (map == null || currentPos == null) {
+        logger.severe("Map or current position is null");
+        return availableDirections;
+      }
 
-    // If all else fails, return all directions except previous move
-    logger.info(
-      "Falling back to all available directions except previous move"
-    );
-    List<String> fallbackDirections = new ArrayList<>(availableDirections);
-    if (previousMove != null) {
-      fallbackDirections.remove(previousMove);
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "Filtering directions - Current: %s, Size: %d, Block: %s, Available: %s",
+            currentPos,
+            size,
+            blockDirection,
+            availableDirections
+          )
+        );
+      }
+
+      // First try normal filtering
+      List<String> filteredDirections = availableDirections
+        .stream()
+        .filter(
+          dir -> {
+            try {
+              boolean safe = isDirectionSafe(
+                map,
+                currentPos,
+                dir,
+                size,
+                blockDirection
+              );
+              if (DEBUG && !safe) {
+                logger.info(
+                  String.format(
+                    "Direction %s from %s is unsafe (size: %d, block: %s)",
+                    dir,
+                    currentPos,
+                    size,
+                    blockDirection
+                  )
+                );
+              }
+              return safe;
+            } catch (Exception e) {
+              logger.warning(
+                String.format(
+                  "Error checking direction %s: %s",
+                  dir,
+                  e.getMessage()
+                )
+              );
+              return false;
+            }
+          }
+        )
+        .collect(Collectors.toList());
+
+      if (!filteredDirections.isEmpty()) {
+        if (DEBUG) {
+          logger.info("Filtered directions: " + filteredDirections);
+        }
+        return filteredDirections;
+      }
+
+      // Handle stuck case
+      if (
+        previousPos != null &&
+        currentPos.equals(previousPos) &&
+        previousMove != null
+      ) {
+        if (DEBUG) {
+          logger.info(
+            String.format(
+              "Agent stuck at %s, removing previous move %s",
+              currentPos,
+              previousMove
+            )
+          );
+        }
+
+        List<String> optimisticDirections = new ArrayList<>(
+          availableDirections
+        );
+        optimisticDirections.remove(previousMove);
+
+        if (!optimisticDirections.isEmpty()) {
+          logger.info("Using optimistic directions: " + optimisticDirections);
+          return optimisticDirections;
+        }
+      }
+
+      // Fallback case
+      List<String> fallbackDirections = new ArrayList<>(availableDirections);
+      if (previousMove != null) {
+        fallbackDirections.remove(previousMove);
+      }
+
+      if (DEBUG) {
+        logger.info(
+          "Using fallback directions: " +
+          (
+            fallbackDirections.isEmpty()
+              ? availableDirections
+              : fallbackDirections
+          )
+        );
+      }
+
+      return fallbackDirections.isEmpty()
+        ? availableDirections
+        : fallbackDirections;
+    } catch (Exception e) {
+      logger.severe("Critical error in filterDirections: " + e.getMessage());
+      e.printStackTrace();
+      return availableDirections; // Return original list in case of critical error
     }
-    return fallbackDirections.isEmpty()
-      ? availableDirections
-      : fallbackDirections;
   }
 
   /**
@@ -329,8 +406,75 @@ public class ObstacleManager {
     int size,
     String blockDirection
   ) {
-    // Implement the logic to determine if a direction is safe
-    // This is a placeholder and should be replaced with the actual implementation
-    return true; // Placeholder return, actual implementation needed
+    try {
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "Checking safety of direction %s from %s (size: %d, block: %s)",
+            direction,
+            currentPos,
+            size,
+            blockDirection
+          )
+        );
+      }
+
+      // Get next position
+      Point nextPos = calculateNextPosition(currentPos, direction);
+
+      // Check agent positions
+      Set<Point> nextAgentPositions = getAgentPositions(nextPos, size);
+      Set<Point> currentAgentPositions = getAgentPositions(currentPos, size);
+
+      // Check for obstacles in agent positions
+      for (Point pos : nextAgentPositions) {
+        if (isPositionInvalid(pos, map)) {
+          if (DEBUG) {
+            logger.info(
+              String.format("Position %s is invalid for agent movement", pos)
+            );
+          }
+          return false;
+        }
+      }
+
+      // If no block, we're done
+      if (blockDirection == null) {
+        return true;
+      }
+
+      // Check block positions
+      Set<Point> currentBlockPositions = getBlockPositions(
+        currentAgentPositions,
+        blockDirection
+      );
+      Set<Point> nextBlockPositions = getBlockPositions(
+        nextAgentPositions,
+        blockDirection
+      );
+
+      // Check for obstacles in block positions
+      for (Point pos : nextBlockPositions) {
+        if (isPositionInvalid(pos, map)) {
+          if (DEBUG) {
+            logger.info(
+              String.format("Position %s is invalid for block movement", pos)
+            );
+          }
+          return false;
+        }
+      }
+
+      return !hasObstacleInPath(
+        currentAgentPositions,
+        nextAgentPositions,
+        currentBlockPositions,
+        nextBlockPositions,
+        map
+      );
+    } catch (Exception e) {
+      logger.warning("Error checking direction safety: " + e.getMessage());
+      return false; // Safer to consider direction unsafe on error
+    }
   }
 }

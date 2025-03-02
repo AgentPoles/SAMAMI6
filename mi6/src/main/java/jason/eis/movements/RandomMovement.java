@@ -416,13 +416,24 @@ public class RandomMovement implements MovementStrategy {
       String resolvedDirection = collisionResolution.getDirection();
       memory.addMove(resolvedDirection, currentPos);
 
-      if ("STUCK".equals(collisionResolution.getReason())) {
-        exploration.triggerPathRecompute(
-          agName,
-          calculateNextPosition(currentPos, resolvedDirection),
-          map,
-          RecomputeReason.STUCK
-        );
+      // Handle different collision reasons
+      switch (collisionResolution.getReason()) {
+        case "STUCK":
+          exploration.triggerPathRecompute(
+            agName,
+            calculateNextPosition(currentPos, resolvedDirection),
+            map,
+            RecomputeReason.STUCK
+          );
+          break;
+        case "OSCILLATION":
+          exploration.triggerPathRecompute(
+            agName,
+            calculateNextPosition(currentPos, resolvedDirection),
+            map,
+            RecomputeReason.OSCILLATION
+          );
+          break;
       }
 
       return resolvedDirection;
