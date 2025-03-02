@@ -14,6 +14,7 @@ public class BoundaryManager {
 
   /**
    * Filters directions based on boundary considerations with fallback options
+   * @param agentId Agent's ID
    * @param availableDirections Initial set of available directions
    * @param map Current map state
    * @param currentPos Agent's current position
@@ -22,6 +23,7 @@ public class BoundaryManager {
    * @return Filtered list of valid directions, never empty if input wasn't empty
    */
   public List<String> filterDirections(
+    String agentId,
     List<String> availableDirections,
     LocalMap map,
     Point currentPos,
@@ -29,24 +31,54 @@ public class BoundaryManager {
     String previousMove
   ) {
     try {
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "[Agent %s] === Starting Direction Filtering ===",
+            agentId
+          )
+        );
+        logger.info(
+          String.format(
+            "[Agent %s] Input - Current: %s, Previous: %s, PrevMove: %s",
+            agentId,
+            currentPos,
+            previousPos,
+            previousMove
+          )
+        );
+        logger.info(
+          String.format(
+            "[Agent %s] Available directions: %s",
+            agentId,
+            availableDirections
+          )
+        );
+      }
+
       // Validate inputs
       if (availableDirections == null) {
-        logger.severe("Available directions list is null");
+        logger.severe(
+          String.format("[Agent %s] Available directions list is null", agentId)
+        );
         return new ArrayList<>();
       }
       if (map == null) {
-        logger.severe("Map is null");
+        logger.severe(String.format("[Agent %s] Map is null", agentId));
         return availableDirections;
       }
       if (currentPos == null) {
-        logger.severe("Current position is null");
+        logger.severe(
+          String.format("[Agent %s] Current position is null", agentId)
+        );
         return availableDirections;
       }
 
       if (DEBUG) {
         logger.info(
           String.format(
-            "Filtering directions - Current: %s, Previous: %s, PrevMove: %s, Available: %s",
+            "[Agent %s] Filtering directions - Current: %s, Previous: %s, PrevMove: %s, Available: %s",
+            agentId,
             currentPos,
             previousPos,
             previousMove,
@@ -63,12 +95,18 @@ public class BoundaryManager {
             try {
               Point next = calculateNextPosition(currentPos, dir);
               boolean forbidden = map.isForbidden(next);
-              boolean hitsBoundary = wouldHitBoundary(map, currentPos, dir);
+              boolean hitsBoundary = wouldHitBoundary(
+                agentId,
+                map,
+                currentPos,
+                dir
+              );
 
               if (DEBUG) {
                 logger.info(
                   String.format(
-                    "Direction %s to %s - Forbidden: %b, Hits Boundary: %b",
+                    "[Agent %s] Checking direction %s to %s - Forbidden: %b, Hits Boundary: %b",
+                    agentId,
                     dir,
                     next,
                     forbidden,
@@ -81,7 +119,8 @@ public class BoundaryManager {
             } catch (Exception e) {
               logger.warning(
                 String.format(
-                  "Error checking direction %s: %s",
+                  "[Agent %s] Error checking direction %s: %s",
+                  agentId,
                   dir,
                   e.getMessage()
                 )
@@ -94,7 +133,16 @@ public class BoundaryManager {
 
       if (!filteredDirections.isEmpty()) {
         if (DEBUG) {
-          logger.info("Filtered directions: " + filteredDirections);
+          logger.info(
+            String.format("[Agent %s] === Filtering Result ===", agentId)
+          );
+          logger.info(
+            String.format(
+              "[Agent %s] Filtered directions: %s",
+              agentId,
+              filteredDirections
+            )
+          );
         }
         return filteredDirections;
       }
@@ -108,7 +156,8 @@ public class BoundaryManager {
         if (DEBUG) {
           logger.info(
             String.format(
-              "Agent stuck at %s, removing previous move %s",
+              "[Agent %s] Agent stuck at %s, removing previous move %s",
+              agentId,
               currentPos,
               previousMove
             )
@@ -121,7 +170,13 @@ public class BoundaryManager {
         optimisticDirections.remove(previousMove);
 
         if (!optimisticDirections.isEmpty()) {
-          logger.info("Using optimistic directions: " + optimisticDirections);
+          logger.info(
+            String.format(
+              "[Agent %s] Using optimistic directions: %s",
+              agentId,
+              optimisticDirections
+            )
+          );
           return optimisticDirections;
         }
       }
@@ -134,8 +189,9 @@ public class BoundaryManager {
 
       if (DEBUG) {
         logger.info(
-          "Using fallback directions: " +
-          (
+          String.format(
+            "[Agent %s] Using fallback directions: %s",
+            agentId,
             fallbackDirections.isEmpty()
               ? availableDirections
               : fallbackDirections
@@ -147,7 +203,13 @@ public class BoundaryManager {
         ? availableDirections
         : fallbackDirections;
     } catch (Exception e) {
-      logger.severe("Critical error in filterDirections: " + e.getMessage());
+      logger.severe(
+        String.format(
+          "[Agent %s] Critical error in filterDirections: %s",
+          agentId,
+          e.getMessage()
+        )
+      );
       e.printStackTrace();
       return availableDirections; // Return original list in case of critical error
     }
@@ -157,6 +219,7 @@ public class BoundaryManager {
    * Checks if moving in a direction would hit a known boundary
    */
   private boolean wouldHitBoundary(
+    String agentId,
     LocalMap map,
     Point currentPos,
     String direction
@@ -166,7 +229,33 @@ public class BoundaryManager {
       Map<String, Point> boundaries = map.getConfirmedBoundariesPositions();
 
       if (boundaries.isEmpty()) {
+        if (DEBUG) logger.info(
+          String.format("[Agent %s] No confirmed boundaries yet", agentId)
+        );
         return false;
+      }
+
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "[Agent %s] Checking boundary collision - Current: %s, Direction: %s, Next: %s",
+            agentId,
+            currentPos,
+            direction,
+            nextPos
+          )
+        );
+        logger.info(
+          String.format(
+            "[Agent %s] Known boundaries: %s",
+            agentId,
+            boundaries
+              .entrySet()
+              .stream()
+              .map(e -> e.getKey() + "=" + e.getValue())
+              .collect(Collectors.joining(", "))
+          )
+        );
       }
 
       for (Map.Entry<String, Point> entry : boundaries.entrySet()) {
@@ -189,25 +278,46 @@ public class BoundaryManager {
             break;
         }
 
-        if (hits && DEBUG) {
+        if (DEBUG) {
           logger.info(
             String.format(
-              "Hit boundary at %s moving %s (boundary: %s %s)",
-              nextPos,
+              "[Agent %s] Boundary check - Direction: %s, Boundary: %s at %s, Would Hit: %b",
+              agentId,
               direction,
               boundaryDir,
-              boundaryPos
+              boundaryPos,
+              hits
             )
           );
         }
 
-        if (hits) return true;
+        if (hits) {
+          logger.warning(
+            String.format(
+              "[Agent %s] BOUNDARY HIT DETECTED - Pos: %s, Dir: %s, Next: %s, Boundary: %s at %s",
+              agentId,
+              currentPos,
+              direction,
+              nextPos,
+              boundaryDir,
+              boundaryPos
+            )
+          );
+          return true;
+        }
       }
 
       return false;
     } catch (Exception e) {
-      logger.warning("Error checking boundary collision: " + e.getMessage());
-      return true; // Safer to assume boundary hit on error
+      logger.severe(
+        String.format(
+          "[Agent %s] Error in boundary check: %s",
+          agentId,
+          e.getMessage()
+        )
+      );
+      e.printStackTrace();
+      return true;
     }
   }
 

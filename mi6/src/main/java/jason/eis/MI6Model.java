@@ -9,8 +9,6 @@ import jason.eis.movements.Exploration;
 import jason.eis.movements.PlannedMovement;
 import jason.eis.movements.RandomMovement;
 import jason.eis.movements.Search;
-import jason.eis.movements.collision.data.BaseCollisionState;
-import jason.eis.movements.collision.data.StuckState;
 import jason.environment.Environment;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -206,25 +204,11 @@ public class MI6Model {
     this.ei = ei;
 
     // Initialize movement components in correct order
-    BaseCollisionState collisionState = new BaseCollisionState();
-    StuckState stuckState = new StuckState();
-
-    // Create collision handler without parameters
     AgentCollisionHandler collisionHandler = new AgentCollisionHandler();
+    Exploration exploration = new Exploration();
 
-    // Create exploration with collision handler
-    Exploration exploration = new Exploration(
-      collisionHandler.getCollisionState()
-    );
-
-    // Initialize movement strategies
-    this.randomMovement =
-      new RandomMovement(
-        collisionState,
-        stuckState,
-        collisionHandler,
-        exploration
-      );
+    // Initialize movement strategies with updated dependencies
+    this.randomMovement = new RandomMovement(collisionHandler, exploration);
     this.plannedMovement = new PlannedMovement();
 
     // Initialize maps and caches

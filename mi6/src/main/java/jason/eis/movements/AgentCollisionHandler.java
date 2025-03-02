@@ -18,48 +18,17 @@ public class AgentCollisionHandler {
   private static final int AWARENESS_ZONE = 2;
   private static final double CRITICAL_DISTANCE = 1.5;
 
-  // Shared states
-  private final BaseCollisionState baseState;
-  private final StuckState stuckState;
-
   // Handlers
   private final StuckHandler stuckHandler;
   private final OscillationHandler oscillationHandler;
-  private final Map<String, AgentState> agentStates;
 
   public AgentCollisionHandler() {
-    this.baseState = new BaseCollisionState();
-    this.stuckState = new StuckState();
-    this.stuckHandler = new StuckHandler(baseState, stuckState);
+    this.stuckHandler = new StuckHandler();
     this.oscillationHandler = new OscillationHandler();
-    this.agentStates = new HashMap<>();
-  }
-
-  private static class AgentState {
-    Point currentPos;
-    Point previousPos;
-    String lastDirection;
-    long lastMoveTime;
-    int size;
-
-    AgentState(Point pos, String direction, int size) {
-      this.currentPos = pos;
-      this.lastDirection = direction;
-      this.size = size;
-      this.lastMoveTime = System.currentTimeMillis();
-    }
-
-    void updateState(Point newPos, String direction, int newSize) {
-      this.previousPos = this.currentPos;
-      this.currentPos = newPos;
-      this.lastDirection = direction;
-      this.size = newSize;
-      this.lastMoveTime = System.currentTimeMillis();
-    }
   }
 
   /**
-   * Main method to handle collisions and provide resolution
+   * Main method to handle collisixons and provide resolution
    * @param agentId The agent requesting collision resolution
    * @param currentPos Current position of the agent
    * @param intendedDirection Direction the agent wants to move
@@ -91,12 +60,8 @@ public class AgentCollisionHandler {
         );
       }
 
-      // Update agent state
-      updateState(agentId, currentPos, intendedDirection, size);
-      AgentState state = agentStates.get(agentId);
-
       // First check for stuck condition (highest priority)
-      if (isStuck(state)) {
+      if (map.isStuck()) {
         String stuckResolution = stuckHandler.resolveStuck(
           agentId,
           map,
@@ -109,11 +74,10 @@ public class AgentCollisionHandler {
 
       // Then check for oscillation
       String oscillationResolution = oscillationHandler.resolveOscillation(
-        agentId,
+        map,
         currentPos,
         intendedDirection,
         availableDirections,
-        size,
         blockAttachment
       );
       if (oscillationResolution != null) {
@@ -137,41 +101,7 @@ public class AgentCollisionHandler {
     }
   }
 
-  private void updateState(
-    String agentId,
-    Point currentPos,
-    String direction,
-    int size
-  ) {
-    AgentState state = agentStates.get(agentId);
-    if (state == null) {
-      state = new AgentState(currentPos, direction, size);
-      agentStates.put(agentId, state);
-    } else {
-      state.updateState(currentPos, direction, size);
-    }
-  }
-
-  private boolean isStuck(AgentState state) {
-    if (state == null || state.previousPos == null) {
-      return false;
-    }
-    return (
-      state.currentPos.equals(state.previousPos) &&
-      (System.currentTimeMillis() - state.lastMoveTime) > 1000
-    ); // 1 second threshold
-  }
-
-  // Helper method to clean up old states periodically
-  public void cleanup() {
-    long currentTime = System.currentTimeMillis();
-    agentStates
-      .entrySet()
-      .removeIf(
-        entry -> (currentTime - entry.getValue().lastMoveTime) > 10000 // 10 seconds
-      );
-  }
-
+  // Helper methods for movement validation
   private List<String> getAvailableDirections(
     LocalMap map,
     Point pos,
@@ -179,14 +109,11 @@ public class AgentCollisionHandler {
     String blockAttachment
   ) {
     List<String> available = new ArrayList<>();
-
-    // Check each cardinal direction
     for (String dir : Arrays.asList("n", "s", "e", "w")) {
       if (isDirectionAvailable(map, pos, dir, size, blockAttachment)) {
         available.add(dir);
       }
     }
-
     return available;
   }
 
@@ -302,14 +229,5 @@ public class AgentCollisionHandler {
       default:
         return current;
     }
-  }
-
-  public void resetState(String agentId) {
-    baseState.resetAgentState(agentId);
-    stuckState.resetStuckState(agentId);
-  }
-
-  public BaseCollisionState getCollisionState() {
-    return baseState;
   }
 }

@@ -185,6 +185,7 @@ public class Search {
       if (
         !obstacleManager
           .filterDirections(
+            "search",
             Collections.singletonList(direction),
             map,
             current,
@@ -385,6 +386,7 @@ public class Search {
     }
 
     List<String> validDirs = obstacleManager.filterDirections(
+      "search",
       possibleDirs,
       map,
       current,

@@ -2,69 +2,35 @@ package jason.eis.movements.collision.handlers;
 
 import jason.eis.LocalMap;
 import jason.eis.Point;
-import jason.eis.movements.collision.data.*;
 import java.util.*;
 
 public class StuckHandler {
-  private final BaseCollisionState baseState;
-  private final StuckState stuckState;
   private final Random random = new Random();
 
-  public StuckHandler(BaseCollisionState baseState, StuckState stuckState) {
-    this.baseState = baseState;
-    this.stuckState = stuckState;
-  }
-
-  public void updateState(
-    String agentId,
-    Point position,
-    String intendedDirection
-  ) {
-    MovementRecord lastMove = baseState.getLastMovement(agentId);
-    // Record the new movement
-    baseState.recordMovement(agentId, position, intendedDirection);
-    // Check if position hasn't changed
-    if (lastMove != null && lastMove.getPosition().equals(position)) {
-      stuckState.incrementStuck(agentId, intendedDirection);
-    } else {
-      stuckState.resetStuckState(agentId);
-    }
+  public StuckHandler() {
+    // No dependencies needed
   }
 
   public String resolveStuck(
-    String agentId,
+    String agentName,
     LocalMap map,
     List<String> availableDirections
   ) {
-    if (!stuckState.isStuck(agentId)) {
+    if (!map.isStuck()) {
       return null;
     }
 
-    // Get agent properties
-    int agentSize = baseState.getAgentSize(agentId);
-    String blockAttachment = baseState.getBlockAttachment(agentId);
+    int agentSize = map.getAgentSize();
+    String blockAttachment = map.getBlockAttachment();
+    Set<String> triedDirections = map.getTriedDirections();
 
-    // Get movement history
-    List<MovementRecord> history = baseState.getMovementHistory(agentId);
-    Set<String> triedDirections = stuckState.getTriedDirections(agentId);
-
-    // If we have a block attached, use block-aware resolution
     if (agentSize > 1 || blockAttachment != null) {
-      return resolveBlockStuck(
-        agentId,
-        map,
-        availableDirections,
-        blockAttachment
-      );
+      return resolveBlockStuck(map, availableDirections, blockAttachment);
     }
 
-    // For single agents, try these strategies in order:
-
-    // 1. Try opposite of last intended direction if not tried
-    if (!history.isEmpty()) {
-      String lastIntended = history.get(0).getIntendedDirection();
-      String oppositeDir = getOppositeDirection(lastIntended);
-
+    String lastDir = map.getLastDirection();
+    if (lastDir != null) {
+      String oppositeDir = getOppositeDirection(lastDir);
       if (
         oppositeDir != null &&
         !triedDirections.contains(oppositeDir) &&
@@ -74,42 +40,34 @@ public class StuckHandler {
       }
     }
 
-    // 2. Try perpendicular directions if available
     List<String> perpendicularDirs = getPerpendicularDirections(
-      history,
+      map.getLastDirection(),
       availableDirections
     );
     if (!perpendicularDirs.isEmpty()) {
       return perpendicularDirs.get(random.nextInt(perpendicularDirs.size()));
     }
 
-    // 3. Try any untried available direction
     List<String> untriedDirs = new ArrayList<>(availableDirections);
     untriedDirs.removeAll(triedDirections);
     if (!untriedDirs.isEmpty()) {
       return untriedDirs.get(random.nextInt(untriedDirs.size()));
     }
 
-    // 4. If all else fails, pick random available direction
     if (!availableDirections.isEmpty()) {
       return availableDirections.get(
         random.nextInt(availableDirections.size())
       );
     }
 
-    // No available directions
     return null;
   }
 
   private String resolveBlockStuck(
-    String agentId,
     LocalMap map,
     List<String> availableDirections,
     String blockAttachment
   ) {
-    // For agents with blocks, we need to be more careful
-
-    // 1. Prefer moving in directions that don't require rotation
     List<String> safeDirections = getSafeDirectionsWithBlock(
       availableDirections,
       blockAttachment
@@ -119,11 +77,10 @@ public class StuckHandler {
       return safeDirections.get(random.nextInt(safeDirections.size()));
     }
 
-    // 2. If we must rotate, ensure we have space
     List<String> rotationSafeDirections = getRotationSafeDirections(
       map,
       availableDirections,
-      baseState.getLastMovement(agentId).getPosition()
+      map.getCurrentPosition()
     );
 
     if (!rotationSafeDirections.isEmpty()) {
@@ -132,7 +89,6 @@ public class StuckHandler {
       );
     }
 
-    // 3. If no safe directions, use any available direction
     if (!availableDirections.isEmpty()) {
       return availableDirections.get(
         random.nextInt(availableDirections.size())
@@ -149,7 +105,6 @@ public class StuckHandler {
     List<String> safeDirections = new ArrayList<>();
 
     for (String dir : availableDirections) {
-      // Safe if moving parallel to attachment or in attachment direction
       if (
         isParallelToAttachment(dir, blockAttachment) ||
         dir.equals(blockAttachment)
@@ -169,7 +124,6 @@ public class StuckHandler {
     List<String> safeDirections = new ArrayList<>();
 
     for (String dir : availableDirections) {
-      // Check if we have space to rotate in this direction
       if (hasRotationSpace(map, position, dir)) {
         safeDirections.add(dir);
       }
@@ -183,11 +137,8 @@ public class StuckHandler {
     Point position,
     String direction
   ) {
-    // Check surrounding cells for rotation space
-    // This is a simplified check - might need more complex logic
     Point nextPos = calculateNextPosition(position, direction);
 
-    // Check immediate neighbors of next position
     for (int dx = -1; dx <= 1; dx++) {
       for (int dy = -1; dy <= 1; dy++) {
         Point checkPos = new Point(nextPos.x + dx, nextPos.y + dy);
@@ -216,12 +167,11 @@ public class StuckHandler {
   }
 
   private List<String> getPerpendicularDirections(
-    List<MovementRecord> history,
+    String lastDir,
     List<String> availableDirections
   ) {
-    if (history.isEmpty()) return new ArrayList<>();
+    if (lastDir == null) return new ArrayList<>();
 
-    String lastDir = history.get(0).getIntendedDirection();
     List<String> perpendicular = new ArrayList<>();
 
     switch (lastDir) {

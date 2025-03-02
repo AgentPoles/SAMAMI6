@@ -244,6 +244,7 @@ public class PlannedMovement implements MovementStrategy {
       // Filter through BoundaryManager
       availableDirections =
         boundaryManager.filterDirections(
+          agName,
           availableDirections,
           map,
           currentPos,
@@ -254,6 +255,7 @@ public class PlannedMovement implements MovementStrategy {
       // Filter through ObstacleManager
       availableDirections =
         obstacleManager.filterDirections(
+          agName,
           availableDirections,
           map,
           currentPos,

@@ -40,6 +40,7 @@ public class ObstacleManager {
    * Filter directions considering agent size and block
    */
   public List<String> filterDirections(
+    String agentId,
     List<String> availableDirections,
     LocalMap map,
     Point currentPos,
@@ -49,49 +50,67 @@ public class ObstacleManager {
     String previousMove
   ) {
     try {
-      // Validate inputs
-      if (availableDirections == null) {
-        logger.severe("Available directions list is null");
-        return new ArrayList<>();
-      }
-      if (map == null || currentPos == null) {
-        logger.severe("Map or current position is null");
-        return availableDirections;
-      }
-
       if (DEBUG) {
         logger.info(
           String.format(
-            "Filtering directions - Current: %s, Size: %d, Block: %s, Available: %s",
+            "[Agent %s] === Starting Obstacle Direction Filtering ===",
+            agentId
+          )
+        );
+        logger.info(
+          String.format(
+            "[Agent %s] Parameters: Current=%s, Size=%d, Block=%s, Previous=%s, PrevMove=%s",
+            agentId,
             currentPos,
             size,
             blockDirection,
+            previousPos,
+            previousMove
+          )
+        );
+        logger.info(
+          String.format(
+            "[Agent %s] Available directions: %s",
+            agentId,
             availableDirections
           )
         );
       }
 
-      // First try normal filtering
+      // Validate inputs
+      if (availableDirections == null) {
+        logger.severe(
+          String.format("[Agent %s] Available directions list is null", agentId)
+        );
+        return new ArrayList<>();
+      }
+      if (map == null || currentPos == null) {
+        logger.severe(
+          String.format("[Agent %s] Map or current position is null", agentId)
+        );
+        return availableDirections;
+      }
+
       List<String> filteredDirections = availableDirections
         .stream()
         .filter(
           dir -> {
             try {
               boolean safe = isDirectionSafe(
+                agentId,
                 map,
                 currentPos,
                 dir,
                 size,
                 blockDirection
               );
-              if (DEBUG && !safe) {
+              if (DEBUG) {
                 logger.info(
                   String.format(
-                    "Direction %s from %s is unsafe (size: %d, block: %s)",
+                    "[Agent %s] Direction %s is %s",
+                    agentId,
                     dir,
-                    currentPos,
-                    size,
-                    blockDirection
+                    safe ? "SAFE" : "UNSAFE"
                   )
                 );
               }
@@ -99,7 +118,8 @@ public class ObstacleManager {
             } catch (Exception e) {
               logger.warning(
                 String.format(
-                  "Error checking direction %s: %s",
+                  "[Agent %s] Error checking direction %s: %s",
+                  agentId,
                   dir,
                   e.getMessage()
                 )
@@ -111,9 +131,13 @@ public class ObstacleManager {
         .collect(Collectors.toList());
 
       if (!filteredDirections.isEmpty()) {
-        if (DEBUG) {
-          logger.info("Filtered directions: " + filteredDirections);
-        }
+        logger.info(
+          String.format(
+            "[Agent %s] Found safe directions: %s",
+            agentId,
+            filteredDirections
+          )
+        );
         return filteredDirections;
       }
 
@@ -123,15 +147,14 @@ public class ObstacleManager {
         currentPos.equals(previousPos) &&
         previousMove != null
       ) {
-        if (DEBUG) {
-          logger.info(
-            String.format(
-              "Agent stuck at %s, removing previous move %s",
-              currentPos,
-              previousMove
-            )
-          );
-        }
+        logger.warning(
+          String.format(
+            "[Agent %s] STUCK DETECTED at %s, last move was %s",
+            agentId,
+            currentPos,
+            previousMove
+          )
+        );
 
         List<String> optimisticDirections = new ArrayList<>(
           availableDirections
@@ -139,7 +162,13 @@ public class ObstacleManager {
         optimisticDirections.remove(previousMove);
 
         if (!optimisticDirections.isEmpty()) {
-          logger.info("Using optimistic directions: " + optimisticDirections);
+          logger.info(
+            String.format(
+              "[Agent %s] Using optimistic directions: %s",
+              agentId,
+              optimisticDirections
+            )
+          );
           return optimisticDirections;
         }
       }
@@ -150,24 +179,29 @@ public class ObstacleManager {
         fallbackDirections.remove(previousMove);
       }
 
-      if (DEBUG) {
-        logger.info(
-          "Using fallback directions: " +
-          (
-            fallbackDirections.isEmpty()
-              ? availableDirections
-              : fallbackDirections
-          )
-        );
-      }
+      logger.warning(
+        String.format(
+          "[Agent %s] Using fallback directions: %s",
+          agentId,
+          fallbackDirections.isEmpty()
+            ? availableDirections
+            : fallbackDirections
+        )
+      );
 
       return fallbackDirections.isEmpty()
         ? availableDirections
         : fallbackDirections;
     } catch (Exception e) {
-      logger.severe("Critical error in filterDirections: " + e.getMessage());
+      logger.severe(
+        String.format(
+          "[Agent %s] Critical error in filterDirections: %s",
+          agentId,
+          e.getMessage()
+        )
+      );
       e.printStackTrace();
-      return availableDirections; // Return original list in case of critical error
+      return availableDirections;
     }
   }
 
@@ -400,6 +434,7 @@ public class ObstacleManager {
   }
 
   private boolean isDirectionSafe(
+    String agentId,
     LocalMap map,
     Point currentPos,
     String direction,
@@ -410,7 +445,8 @@ public class ObstacleManager {
       if (DEBUG) {
         logger.info(
           String.format(
-            "Checking safety of direction %s from %s (size: %d, block: %s)",
+            "[Agent %s] Checking safety for direction %s from %s (size=%d, block=%s)",
+            agentId,
             direction,
             currentPos,
             size,
@@ -419,62 +455,129 @@ public class ObstacleManager {
         );
       }
 
-      // Get next position
       Point nextPos = calculateNextPosition(currentPos, direction);
-
-      // Check agent positions
       Set<Point> nextAgentPositions = getAgentPositions(nextPos, size);
       Set<Point> currentAgentPositions = getAgentPositions(currentPos, size);
 
-      // Check for obstacles in agent positions
+      // Log agent positions
+      if (DEBUG) {
+        logger.info(
+          String.format(
+            "[Agent %s] Current positions: %s",
+            agentId,
+            currentAgentPositions
+          )
+        );
+        logger.info(
+          String.format(
+            "[Agent %s] Next positions: %s",
+            agentId,
+            nextAgentPositions
+          )
+        );
+      }
+
+      // Check agent positions
       for (Point pos : nextAgentPositions) {
         if (isPositionInvalid(pos, map)) {
-          if (DEBUG) {
-            logger.info(
-              String.format("Position %s is invalid for agent movement", pos)
-            );
-          }
+          logger.info(
+            String.format(
+              "[Agent %s] Invalid position detected for agent at %s",
+              agentId,
+              pos
+            )
+          );
           return false;
         }
       }
 
-      // If no block, we're done
-      if (blockDirection == null) {
-        return true;
-      }
+      if (blockDirection != null) {
+        Set<Point> currentBlockPositions = getBlockPositions(
+          currentAgentPositions,
+          blockDirection
+        );
+        Set<Point> nextBlockPositions = getBlockPositions(
+          nextAgentPositions,
+          blockDirection
+        );
 
-      // Check block positions
-      Set<Point> currentBlockPositions = getBlockPositions(
-        currentAgentPositions,
-        blockDirection
-      );
-      Set<Point> nextBlockPositions = getBlockPositions(
-        nextAgentPositions,
-        blockDirection
-      );
+        if (DEBUG) {
+          logger.info(
+            String.format(
+              "[Agent %s] Current block positions: %s",
+              agentId,
+              currentBlockPositions
+            )
+          );
+          logger.info(
+            String.format(
+              "[Agent %s] Next block positions: %s",
+              agentId,
+              nextBlockPositions
+            )
+          );
+        }
 
-      // Check for obstacles in block positions
-      for (Point pos : nextBlockPositions) {
-        if (isPositionInvalid(pos, map)) {
-          if (DEBUG) {
+        for (Point pos : nextBlockPositions) {
+          if (isPositionInvalid(pos, map)) {
             logger.info(
-              String.format("Position %s is invalid for block movement", pos)
+              String.format(
+                "[Agent %s] Invalid position detected for block at %s",
+                agentId,
+                pos
+              )
             );
+            return false;
           }
+        }
+
+        boolean hasObstacle = hasObstacleInPath(
+          currentAgentPositions,
+          nextAgentPositions,
+          currentBlockPositions,
+          nextBlockPositions,
+          map
+        );
+        if (hasObstacle) {
+          logger.info(
+            String.format(
+              "[Agent %s] Obstacle detected in movement path",
+              agentId
+            )
+          );
           return false;
         }
       }
 
-      return !hasObstacleInPath(
-        currentAgentPositions,
-        nextAgentPositions,
-        currentBlockPositions,
-        nextBlockPositions,
-        map
-      );
+      return true;
     } catch (Exception e) {
-      logger.warning("Error checking direction safety: " + e.getMessage());
-      return false; // Safer to consider direction unsafe on error
+      logger.warning(
+        String.format(
+          "[Agent %s] Error checking direction safety: %s",
+          agentId,
+          e.getMessage()
+        )
+      );
+      return false;
     }
+  }
+
+  private boolean isPositionInvalid(String agentId, Point pos, LocalMap map) {
+    boolean hasObstacle = map.hasObstacle(pos);
+    boolean outOfBounds = map.isOutOfBounds(pos);
+    boolean invalid = hasObstacle || outOfBounds;
+
+    if (invalid && DEBUG) {
+      logger.info(
+        String.format(
+          "[Agent %s] Position %s invalid: hasObstacle=%b, outOfBounds=%b",
+          agentId,
+          pos,
+          hasObstacle,
+          outOfBounds
+        )
+      );
+    }
+    return invalid;
   }
 }

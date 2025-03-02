@@ -4,7 +4,6 @@ import jason.asSyntax.Atom;
 import jason.asSyntax.NumberTerm;
 import jason.asSyntax.Term;
 import jason.eis.movements.Search;
-import jason.eis.movements.collision.data.BaseCollisionState;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
@@ -17,6 +16,12 @@ public class LocalMap {
   private static final int CELL_SIZE = 8; // Power of 2 for efficient division
   private static final int STALE_THRESHOLD = 30000; // 30 seconds in milliseconds
   public static boolean DEBUG = false;
+
+  // Add these constants at the top of the LocalMap class with the other constants
+  private static final double HEAT_DECAY_RATE = 0.92;
+  private static final double INITIAL_HEAT = 1.0;
+  private static final double MIN_HEAT = 0.1;
+  private static final int HEAT_RADIUS = 3;
 
   // Current position tracking
   private Point currentPosition;
@@ -76,7 +81,74 @@ public class LocalMap {
   private static final int MAX_VISIT_COUNT = 10;
 
   // Add this field at the top of the class
-  private final BaseCollisionState collisionState;
+
+  private static final int MOVEMENT_HISTORY_SIZE = 9;
+  private static final int MEMORY_SIZE = 5;
+
+  // Core movement tracking
+  private final Deque<MovementRecord> movementHistory = new LinkedList<>();
+  private int agentSize = 1;
+  private String blockAttachment = null;
+  private final Deque<String> lastMoves = new ArrayDeque<>(MEMORY_SIZE);
+  private Point lastPosition = null;
+  private String lastRecommendedDirection = null;
+
+  // Boundary state tracking
+  private final Map<String, Integer> boundaryAttempts = new ConcurrentHashMap<>();
+  private final Map<String, Boolean> isOnBoundary = new ConcurrentHashMap<>();
+  private final Map<String, String> lastBoundaryDirections = new ConcurrentHashMap<>();
+
+  // Add these constants
+  private static final int STUCK_THRESHOLD = 3;
+  private static final long STUCK_TIMEOUT = 5000; // 5 seconds
+
+  // Add these fields
+  private int stuckCounter = 0;
+  private Long stuckStartTime = null;
+  private final Set<String> triedDirections = new HashSet<>();
+
+  // Add oscillation constants
+  private static final long OSCILLATION_TIMEOUT = 5000;
+  private static final int OSCILLATION_THRESHOLD = 3;
+  private static final int PATTERN_HISTORY_SIZE = 9;
+  private static final long PATTERN_TIMEOUT = 2000;
+
+  // Keep only these for oscillation state
+  private int patternCount = 0;
+  private long lastOscillationUpdateTime = System.currentTimeMillis();
+  private int movesSinceLastPatternCheck = 0; // Add this to track when to check
+
+  // Add this field to track when to check for stuck state
+  private int movesSinceLastStuckCheck = 0;
+  private boolean wasStuckLastCheck = false;
+
+  // Add these constants
+  private static final int SAME_DIRECTION_THRESHOLD = 7;
+  private static final int CHECK_INTERVAL = 3; // Single constant for all interval checks
+
+  // Add field to track consecutive same direction moves
+  private String lastDirection = null;
+  private int sameDirectionCount = 0;
+
+  // Add this field
+  private final Set<String> oscillatingDirections = new HashSet<>();
+
+  // Add these fields with the other fields
+  private final Map<Point, Double> heatMap = new ConcurrentHashMap<>();
+  private long lastHeatDecay = System.currentTimeMillis();
+
+  // Update MovementRecord class to include timestamp
+  public static class MovementRecord {
+    public final Point position;
+    public final String direction;
+    public final long timestamp;
+
+    public MovementRecord(Point position, String direction) {
+      this.position = position;
+      this.direction = direction;
+      this.timestamp = System.currentTimeMillis();
+    }
+  }
 
   private static class DirectionMemory {
     private Point lastPosition;
@@ -350,7 +422,6 @@ public class LocalMap {
     this.typeIndex = new EnumMap<>(EntityType.class);
     this.entityRegistry = new ConcurrentHashMap<>();
     this.debugTrackingMap = DEBUG ? new ConcurrentHashMap<>() : null;
-    this.collisionState = new BaseCollisionState();
 
     // Initialize type index
     for (EntityType type : EntityType.values()) {
@@ -413,6 +484,52 @@ public class LocalMap {
         );
       }
 
+      // Record movement in our single movement history
+      recordMovement(newPosition, direction);
+
+      // Track direction count
+      if (direction.equals(lastDirection)) {
+        sameDirectionCount++;
+      } else {
+        sameDirectionCount = 1;
+        lastDirection = direction;
+      }
+
+      // Perform all checks every CHECK_INTERVAL steps
+      movesSinceLastStuckCheck++;
+      if (movesSinceLastStuckCheck >= CHECK_INTERVAL) {
+        movesSinceLastStuckCheck = 0;
+
+        // Check for same-direction stuck
+        if (sameDirectionCount >= SAME_DIRECTION_THRESHOLD) {
+          incrementStuck(direction);
+          wasStuckLastCheck = true;
+        }
+
+        // Check for position-based stuck
+        if (isPositionStuck(newPosition)) {
+          incrementStuck(direction);
+          wasStuckLastCheck = true;
+        } else if (!wasStuckLastCheck) {
+          resetStuckState();
+        }
+
+        // Check for oscillation pattern
+        if (detectPattern()) {
+          patternCount++;
+          lastOscillationUpdateTime = System.currentTimeMillis();
+        } else {
+          patternCount = 0;
+        }
+      } else if (wasStuckLastCheck) {
+        // Immediate recheck if was stuck
+        if (!isPositionStuck(newPosition)) {
+          resetStuckState();
+          wasStuckLastCheck = false;
+          movesSinceLastStuckCheck = 0;
+        }
+      }
+
       // Update visit tracking
       visitedCells.merge(newPosition, 1, Integer::sum);
       lastVisitTime.put(newPosition, System.currentTimeMillis());
@@ -420,21 +537,28 @@ public class LocalMap {
       // Clean up old visit records periodically
       cleanupOldVisits();
 
-      // Update collision state
-      String agentId = Thread.currentThread().getName();
-      collisionState.recordMovement(agentId, newPosition, direction);
+      // Update heat map for new position
+      updateHeatMap(newPosition);
 
-      // Check if we're moving towards a boundary
-      if (confirmedBoundaries.containsKey(direction)) {
-        collisionState.incrementBoundaryAttempts(agentId);
-        collisionState.setOnBoundary(agentId, true);
-        collisionState.setLastBoundaryDirection(agentId, direction);
-      } else {
-        collisionState.setOnBoundary(agentId, false);
-      }
-
+      // Update current position
       currentPosition = newPosition;
     }
+  }
+
+  private boolean isPositionStuck(Point newPosition) {
+    if (movementHistory.size() < 3) return false;
+
+    // Get last 3 positions
+    List<Point> lastPositions = movementHistory
+      .stream()
+      .limit(3)
+      .map(record -> record.position)
+      .collect(Collectors.toList());
+
+    // Check if all positions are the same
+    return lastPositions
+      .stream()
+      .allMatch(pos -> pos.equals(lastPositions.get(0)));
   }
 
   // Entity management
@@ -1605,5 +1729,211 @@ public class LocalMap {
 
   public boolean isExplored(Point pos) {
     return visitedCells.containsKey(pos);
+  }
+
+  // Add collision state methods
+  private void recordMovement(Point newPosition, String direction) {
+    // Record movement history
+    movementHistory.addFirst(new MovementRecord(newPosition, direction));
+    if (movementHistory.size() > MOVEMENT_HISTORY_SIZE) {
+      movementHistory.removeLast();
+    }
+
+    // Update last moves
+    if (lastMoves.size() >= MEMORY_SIZE) {
+      lastMoves.removeLast();
+    }
+    lastMoves.addFirst(direction);
+
+    // Update position tracking
+    lastPosition = currentPosition; // Store the previous position
+    lastRecommendedDirection = direction; // Store the successful direction
+  }
+
+  // Update the state methods
+  public void updateAgentState(int size, String blockAttachment) {
+    this.agentSize = size;
+    this.blockAttachment = blockAttachment;
+  }
+
+  public List<MovementRecord> getMovementHistory() {
+    return new ArrayList<>(movementHistory);
+  }
+
+  public MovementRecord getLastMovement() {
+    return !movementHistory.isEmpty() ? movementHistory.getFirst() : null;
+  }
+
+  public String getLastDirection() {
+    return !lastMoves.isEmpty() ? lastMoves.getFirst() : null;
+  }
+
+  public Point getLastPosition() {
+    return lastPosition;
+  }
+
+  public String getLastRecommendedDirection() {
+    return lastRecommendedDirection;
+  }
+
+  public int getAgentSize() {
+    return agentSize;
+  }
+
+  public String getBlockAttachment() {
+    return blockAttachment;
+  }
+
+  // Add these methods
+  public void incrementStuck(String attemptedDirection) {
+    if (stuckCounter == 0) {
+      stuckStartTime = System.currentTimeMillis();
+      triedDirections.clear();
+    }
+    stuckCounter++;
+    if (attemptedDirection != null) {
+      triedDirections.add(attemptedDirection);
+    }
+  }
+
+  public boolean isStuck() {
+    return stuckCounter >= STUCK_THRESHOLD;
+  }
+
+  public Set<String> getTriedDirections() {
+    return new HashSet<>(triedDirections);
+  }
+
+  public void resetStuckState() {
+    stuckCounter = 0;
+    stuckStartTime = null;
+    triedDirections.clear();
+  }
+
+  public boolean isStuckTimeout() {
+    return (
+      stuckStartTime != null &&
+      System.currentTimeMillis() - stuckStartTime > STUCK_TIMEOUT
+    );
+  }
+
+  // Add oscillation tracking methods
+  public boolean detectPattern() {
+    List<MovementRecord> recent = new ArrayList<>(movementHistory);
+    if (recent.size() < 4) return false;
+
+    oscillatingDirections.clear(); // Clear previous oscillating directions
+
+    // Two-step pattern check (back and forth)
+    String lastDir = recent.get(0).direction;
+    String prevDir = recent.get(1).direction;
+    if (lastDir != null && prevDir != null && isOpposite(lastDir, prevDir)) {
+      oscillatingDirections.add(lastDir);
+      oscillatingDirections.add(prevDir);
+      return true;
+    }
+
+    // Three-step pattern check
+    if (recent.size() >= 9) {
+      List<String> lastThree = getDirections(recent, 0, 3);
+      List<String> middleThree = getDirections(recent, 3, 6);
+      List<String> firstThree = getDirections(recent, 6, 9);
+
+      if (lastThree == null || middleThree == null || firstThree == null) {
+        return false;
+      }
+
+      if (lastThree.equals(middleThree) || lastThree.equals(firstThree)) {
+        oscillatingDirections.addAll(lastThree);
+        return true;
+      }
+      if (middleThree.equals(firstThree)) {
+        oscillatingDirections.addAll(middleThree);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private boolean isOpposite(String dir1, String dir2) {
+    if (dir1 == null || dir2 == null) return false;
+    switch (dir1) {
+      case "n":
+        return dir2.equals("s");
+      case "s":
+        return dir2.equals("n");
+      case "e":
+        return dir2.equals("w");
+      case "w":
+        return dir2.equals("e");
+      default:
+        return false;
+    }
+  }
+
+  public boolean isOscillating() {
+    return (
+      patternCount >= OSCILLATION_THRESHOLD &&
+      (System.currentTimeMillis() - lastOscillationUpdateTime) < PATTERN_TIMEOUT
+    );
+  }
+
+  public void resetOscillationState() {
+    patternCount = 0;
+    movesSinceLastPatternCheck = 0;
+    lastOscillationUpdateTime = System.currentTimeMillis();
+    oscillatingDirections.clear(); // Clear the directions when resetting
+  }
+
+  // Helper method to get directions from movement records
+  private List<String> getDirections(
+    List<MovementRecord> records,
+    int start,
+    int end
+  ) {
+    List<String> directions = new ArrayList<>();
+    for (int i = start; i < end && i < records.size(); i++) {
+      String dir = records.get(i).direction;
+      if (dir == null) return null;
+      directions.add(dir);
+    }
+    return directions.size() == (end - start) ? directions : null;
+  }
+
+  // Add this method to LocalMap class
+  public Set<String> getOscillatingDirections() {
+    return new HashSet<>(oscillatingDirections); // Return a copy to prevent external modification
+  }
+
+  // Add this method to update heat
+  public void updateHeatMap(Point position) {
+    long now = System.currentTimeMillis();
+    if (now - lastHeatDecay > 1000) { // Decay every second
+      heatMap.replaceAll((k, v) -> Math.max(MIN_HEAT, v * HEAT_DECAY_RATE));
+      lastHeatDecay = now;
+    }
+
+    // Update heat in radius around position
+    for (int dx = -HEAT_RADIUS; dx <= HEAT_RADIUS; dx++) {
+      for (int dy = -HEAT_RADIUS; dy <= HEAT_RADIUS; dy++) {
+        Point p = new Point(position.x + dx, position.y + dy);
+        double distance = Math.sqrt(dx * dx + dy * dy);
+        if (distance <= HEAT_RADIUS) {
+          double heatValue = INITIAL_HEAT * Math.exp(-distance / HEAT_RADIUS);
+          heatMap.merge(p, heatValue, (old, new_) -> Math.min(1.0, old + new_));
+        }
+      }
+    }
+  }
+
+  // Add this method to get heat score
+  public double getHeatScore(Point zone) {
+    return heatMap.getOrDefault(zone, 0.0);
+  }
+
+  // Add this method to get the entire heat map
+  public Map<Point, Double> getHeatMap() {
+    return new HashMap<>(heatMap);
   }
 }
