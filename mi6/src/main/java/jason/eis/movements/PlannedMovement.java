@@ -40,16 +40,19 @@ public class PlannedMovement implements MovementStrategy {
   }
 
   private static class MovementState {
+    String agentName;
     Point targetPosition;
     Search.TargetType targetType;
     List<String> plannedPath;
-    List<String> originalPath; // Keep original path for deviation checks
+    List<String> originalPath;
     long pathCalculatedTime;
     int currentPathIndex;
-    int deviationAttempts; // Track number of deviation attempts
-    boolean isDeviating; // Flag if currently following a deviation
+    int deviationAttempts;
+    boolean isDeviating;
+    List<Point> recentPositions;
 
-    MovementState(Point target, Search.TargetType type) {
+    MovementState(String agentName, Point target, Search.TargetType type) {
+      this.agentName = agentName;
       this.targetPosition = target;
       this.targetType = type;
       this.plannedPath = new ArrayList<>();
@@ -58,6 +61,7 @@ public class PlannedMovement implements MovementStrategy {
       this.currentPathIndex = 0;
       this.deviationAttempts = 0;
       this.isDeviating = false;
+      this.recentPositions = new ArrayList<>();
     }
 
     void setNewPath(List<String> path) {
@@ -86,6 +90,24 @@ public class PlannedMovement implements MovementStrategy {
         currentPathIndex >= plannedPath.size() ||
         System.currentTimeMillis() - pathCalculatedTime > PATH_TIMEOUT
       );
+    }
+
+    boolean isOscillating() {
+      if (recentPositions.size() < 4) return false;
+
+      // Check last 4 positions for oscillation pattern
+      int last = recentPositions.size() - 1;
+      return (
+        recentPositions.get(last).equals(recentPositions.get(last - 2)) &&
+        recentPositions.get(last - 1).equals(recentPositions.get(last - 3))
+      );
+    }
+
+    void updatePosition(Point pos) {
+      recentPositions.add(pos);
+      if (recentPositions.size() > 4) {
+        recentPositions.remove(0);
+      }
     }
 
     @Override
@@ -117,39 +139,92 @@ public class PlannedMovement implements MovementStrategy {
     int size,
     String blockDirection
   ) {
-    if (map == null || currentPos == null || targetType == null) {
-      logger.warning("Invalid parameters in findNearestTarget");
-      return null;
-    }
-
-    List<Point> targets = getTargetsOfType(map, targetType);
-    if (targets.isEmpty()) {
-      if (DEBUG) logger.info("No targets found for type: " + targetType);
-      return null;
-    }
-
-    // Sort targets by Manhattan distance
-    targets.sort(
-      (a, b) -> {
-        int distA = getManhattanDistance(currentPos, a);
-        int distB = getManhattanDistance(currentPos, b);
-        return Integer.compare(distA, distB);
+    try {
+      if (!validateTargetSearchInputs(map, currentPos, targetType)) {
+        return null;
       }
-    );
 
-    // Check closest targets for best path
-    List<Point> nearestTargets = targets.subList(
-      0,
-      Math.min(MAX_TARGETS_TO_CHECK, targets.size())
-    );
-    return findBestTarget(
-      currentPos,
-      nearestTargets,
-      map,
-      targetType,
-      size,
-      blockDirection
-    );
+      List<Point> targets = getTargetsOfType(map, targetType);
+      if (targets.isEmpty()) {
+        debug("No targets found for type: %s", targetType);
+        return null;
+      }
+
+      // Sort and filter targets safely
+      List<Point> sortedTargets = getSortedTargets(targets, currentPos);
+      List<Point> nearestTargets = getNearestTargets(sortedTargets);
+
+      return findBestTarget(
+        currentPos,
+        nearestTargets,
+        map,
+        targetType,
+        size,
+        blockDirection
+      );
+    } catch (Exception e) {
+      logger.severe(
+        String.format("Critical error in findNearestTarget: %s", e.getMessage())
+      );
+      return null;
+    }
+  }
+
+  private boolean validateTargetSearchInputs(
+    LocalMap map,
+    Point currentPos,
+    Search.TargetType targetType
+  ) {
+    if (map == null) {
+      logger.warning("Map is null in target search");
+      return false;
+    }
+    if (currentPos == null) {
+      logger.warning("Current position is null in target search");
+      return false;
+    }
+    if (targetType == null) {
+      logger.warning("Target type is null in target search");
+      return false;
+    }
+    return true;
+  }
+
+  private List<Point> getSortedTargets(List<Point> targets, Point currentPos) {
+    try {
+      return targets
+        .stream()
+        .filter(Objects::nonNull)
+        .sorted(
+          (a, b) -> {
+            try {
+              return Integer.compare(
+                getManhattanDistance(currentPos, a),
+                getManhattanDistance(currentPos, b)
+              );
+            } catch (Exception e) {
+              logger.warning("Error comparing distances: " + e.getMessage());
+              return 0;
+            }
+          }
+        )
+        .collect(Collectors.toList());
+    } catch (Exception e) {
+      logger.warning("Error sorting targets: " + e.getMessage());
+      return new ArrayList<>(targets);
+    }
+  }
+
+  private List<Point> getNearestTargets(List<Point> sortedTargets) {
+    try {
+      return sortedTargets.subList(
+        0,
+        Math.min(MAX_TARGETS_TO_CHECK, sortedTargets.size())
+      );
+    } catch (Exception e) {
+      logger.warning("Error getting nearest targets: " + e.getMessage());
+      return sortedTargets;
+    }
   }
 
   private Point findBestTarget(
@@ -160,44 +235,84 @@ public class PlannedMovement implements MovementStrategy {
     int size,
     String blockDirection
   ) {
-    Point bestTarget = null;
-    int minDistance = Integer.MAX_VALUE;
+    try {
+      Point bestTarget = null;
+      int minDistance = Integer.MAX_VALUE;
 
-    for (Point target : targets) {
-      try {
-        int manhattanDist = getManhattanDistance(currentPos, target);
-        if (manhattanDist >= minDistance || manhattanDist > MAX_SEARCH_RANGE) {
-          continue;
-        }
-
-        Search.PathResult path = search.findPath(
-          currentPos,
-          target,
-          map,
-          targetType,
-          size,
-          blockDirection
-        );
-        if (path != null && path.success && path.points.size() < minDistance) {
-          minDistance = path.points.size();
-          bestTarget = target;
-          if (DEBUG) {
-            logger.info(
-              String.format(
-                "New best target found at %s with path length %d",
-                bestTarget,
-                minDistance
-              )
-            );
+      for (Point target : targets) {
+        try {
+          int manhattanDist = getManhattanDistance(currentPos, target);
+          if (
+            manhattanDist >= minDistance || manhattanDist > MAX_SEARCH_RANGE
+          ) {
+            continue;
           }
+
+          Search.PathResult path = search.findPath(
+            currentPos,
+            target,
+            map,
+            targetType,
+            size,
+            blockDirection,
+            Search.PathRecomputeReason.DEFAULT
+          );
+
+          if (path != null && path.success) {
+            bestTarget = target;
+            minDistance = manhattanDist;
+          }
+        } catch (Exception e) {
+          logger.warning(
+            String.format(
+              "Error checking target %s: %s",
+              target,
+              e.getMessage()
+            )
+          );
         }
-      } catch (Exception e) {
-        logger.warning(
-          "Error evaluating target " + target + ": " + e.getMessage()
-        );
       }
+
+      return bestTarget;
+    } catch (Exception e) {
+      logger.severe("Critical error in findBestTarget: " + e.getMessage());
+      return null;
     }
-    return bestTarget;
+  }
+
+  private Search.PathResult searchPathSafely(
+    Point start,
+    Point goal,
+    LocalMap map,
+    Search.TargetType targetType,
+    int size,
+    String blockDirection
+  ) {
+    try {
+      return search.findPath(
+        start,
+        goal,
+        map,
+        targetType,
+        size,
+        blockDirection,
+        Search.PathRecomputeReason.DEFAULT
+      );
+    } catch (Exception e) {
+      logger.warning(
+        String.format(
+          "Path finding error from %s to %s: %s",
+          start,
+          goal,
+          e.getMessage()
+        )
+      );
+      return null;
+    }
+  }
+
+  private boolean isPathValid(Search.PathResult path) {
+    return path != null && path.success && !path.points.isEmpty();
   }
 
   @Override
@@ -214,49 +329,159 @@ public class PlannedMovement implements MovementStrategy {
     String blockDirection
   ) {
     try {
-      // Validate inputs
       if (agName == null || map == null) {
-        logger.warning(
-          String.format(
-            "Invalid parameters in getNextDirection: agent=%s, map=%s",
-            agName,
-            map != null ? "valid" : "null"
-          )
+        logWarningf(
+          "Invalid parameters in getNextDirection: agent=%s, map=%s",
+          agName,
+          map != null ? "valid" : "null"
         );
         return null;
       }
 
       MovementState state = agentStates.get(agName);
       if (state == null) {
-        if (DEBUG) logger.info("No movement state for agent: " + agName);
+        debug("No movement state for agent: %s", agName);
         return null;
       }
 
       Point currentPos = map.getCurrentPosition();
       if (currentPos == null) {
-        logger.warning("Current position is null for agent: " + agName);
+        logWarningf("[%s] Current position is null", agName);
         return null;
       }
 
-      // Start with all possible directions
-      List<String> availableDirections = Arrays.asList("n", "s", "e", "w");
+      debug(
+        "[%s] Processing movement at pos %s to target %s (type: %s)",
+        agName,
+        currentPos,
+        state.targetPosition,
+        state.targetType
+      );
 
-      // Filter through BoundaryManager
-      availableDirections =
+      // Get and validate available directions
+      List<String> availableDirections = getValidDirections(
+        agName,
+        currentPos,
+        map,
+        size,
+        blockDirection,
+        state
+      );
+      if (availableDirections.isEmpty()) {
+        debug(
+          "[%s] No available directions at position %s",
+          agName,
+          currentPos
+        );
+        return null;
+      }
+
+      // Handle collisions first
+      String collisionDirection = handleCollisions(
+        agName,
+        currentPos,
+        state,
+        map,
+        size,
+        blockDirection,
+        availableDirections
+      );
+      if (collisionDirection != null) {
+        debug(
+          "[%s] Using collision resolution direction: %s",
+          agName,
+          collisionDirection
+        );
+        return collisionDirection;
+      }
+
+      // Check if we've reached the target
+      if (hasReachedTarget(currentPos, state.targetPosition, size)) {
+        debug("[%s] Reached target position %s", agName, state.targetPosition);
+        clearTarget(agName);
+        return null;
+      }
+
+      // Get planned move
+      String plannedMove = getPlannedMove(
+        state,
+        currentPos,
+        map,
+        size,
+        blockDirection
+      );
+      if (plannedMove != null && availableDirections.contains(plannedMove)) {
+        debug("[%s] Using planned move: %s", agName, plannedMove);
+        state.currentPathIndex++;
+        return plannedMove;
+      }
+
+      // Fallback to best available direction
+      String bestDirection = chooseBestDirection(
+        availableDirections,
+        currentPos,
+        state.targetPosition,
+        map
+      );
+      debug("[%s] Using best available direction: %s", agName, bestDirection);
+      handleDeviation(
+        state,
+        bestDirection,
+        currentPos,
+        map,
+        size,
+        blockDirection
+      );
+      return bestDirection;
+    } catch (Exception e) {
+      logWarningf("Error in getNextDirection: %s", e.getMessage());
+      return null;
+    }
+  }
+
+  private boolean validateInputs(String agName, LocalMap map, int size) {
+    if (agName == null) {
+      logger.warning("Agent name is null");
+      return false;
+    }
+    if (map == null) {
+      logger.warning(String.format("[%s] Map is null", agName));
+      return false;
+    }
+    if (size < 1) {
+      logger.warning(String.format("[%s] Invalid size: %d", agName, size));
+      return false;
+    }
+    return true;
+  }
+
+  private List<String> getValidDirections(
+    String agName,
+    Point currentPos,
+    LocalMap map,
+    int size,
+    String blockDirection,
+    MovementState state
+  ) {
+    try {
+      List<String> directions = Arrays.asList("n", "s", "e", "w");
+
+      // Apply boundary constraints
+      directions =
         boundaryManager.filterDirections(
           agName,
-          availableDirections,
+          directions,
           map,
           currentPos,
           state.targetPosition,
           state.getCurrentStep()
         );
 
-      // Filter through ObstacleManager
-      availableDirections =
+      // Apply obstacle constraints
+      directions =
         obstacleManager.filterDirections(
           agName,
-          availableDirections,
+          directions,
           map,
           currentPos,
           size,
@@ -265,7 +490,34 @@ public class PlannedMovement implements MovementStrategy {
           state.getCurrentStep()
         );
 
-      // Check for collisions first - this takes immediate priority
+      debug(
+        "[%s] Valid directions after filtering: %s",
+        agName,
+        String.join(",", directions)
+      );
+      return directions;
+    } catch (Exception e) {
+      logger.warning(
+        String.format(
+          "[%s] Error getting valid directions: %s",
+          agName,
+          e.getMessage()
+        )
+      );
+      return new ArrayList<>();
+    }
+  }
+
+  private String handleCollisions(
+    String agName,
+    Point currentPos,
+    MovementState state,
+    LocalMap map,
+    int size,
+    String blockDirection,
+    List<String> availableDirections
+  ) {
+    try {
       CollisionResolution resolution = collisionHandler.resolveCollision(
         agName,
         currentPos,
@@ -277,62 +529,57 @@ public class PlannedMovement implements MovementStrategy {
       );
 
       if (resolution != null) {
-        // Handle deviation with the collision resolution direction
-        handleDeviation(
-          state,
-          resolution.getDirection(),
-          currentPos,
-          map,
-          size,
-          blockDirection
+        String direction = resolution.getDirection();
+        debug(
+          "[%s] Collision resolved with direction: %s, reason: %s",
+          agName,
+          direction,
+          resolution.getReason()
         );
 
         if ("STUCK".equals(resolution.getReason())) {
-          // Force immediate path recalculation
           state.plannedPath.clear();
+          debug("[%s] Clearing planned path due to STUCK state", agName);
         }
 
-        return resolution.getDirection();
-      }
-
-      // No collision, proceed with normal planned movement
-      String plannedMove = getPlannedMove(
-        state,
-        currentPos,
-        map,
-        size,
-        blockDirection
-      );
-
-      // If planned move is available and valid in available directions, use it
-      if (plannedMove != null && availableDirections.contains(plannedMove)) {
-        state.currentPathIndex++;
-        return plannedMove;
-      }
-
-      // Planned move not valid, choose best available direction and recompute path
-      if (!availableDirections.isEmpty()) {
-        String bestDirection = chooseBestDirection(
-          availableDirections,
-          currentPos,
-          state.targetPosition,
-          map
-        );
         handleDeviation(
           state,
-          bestDirection,
+          direction,
           currentPos,
           map,
           size,
           blockDirection
         );
-        return bestDirection;
+        return direction;
       }
-
       return null;
     } catch (Exception e) {
-      logger.severe("Error in getNextDirection: " + e.getMessage());
+      logger.warning(
+        String.format(
+          "[%s] Error handling collisions: %s",
+          agName,
+          e.getMessage()
+        )
+      );
       return null;
+    }
+  }
+
+  private boolean hasReachedTarget(
+    Point currentPos,
+    Point targetPos,
+    int size
+  ) {
+    if (currentPos == null || targetPos == null) return false;
+
+    // For size > 1, check if we're adjacent to the target
+    int distance = getManhattanDistance(currentPos, targetPos);
+    return size == 1 ? distance == 0 : distance <= 1;
+  }
+
+  private void debug(String format, Object... args) {
+    if (DEBUG) {
+      logger.fine(String.format(format, args));
     }
   }
 
@@ -384,7 +631,8 @@ public class PlannedMovement implements MovementStrategy {
         map,
         state.targetType,
         size,
-        blockDirection
+        blockDirection,
+        Search.PathRecomputeReason.STUCK
       );
 
       if (newPath != null && newPath.success) {
@@ -402,11 +650,15 @@ public class PlannedMovement implements MovementStrategy {
         logger.warning("Null agent name in setTarget");
         return;
       }
-      MovementState state = new MovementState(target, type);
+      MovementState state = new MovementState(agName, target, type);
       agentStates.put(agName, state);
     } catch (Exception e) {
-      logger.warning("Error in setTarget: " + e.getMessage());
+      logger.warning(formatLog("Error in setTarget: %s", e.getMessage()));
     }
+  }
+
+  private String formatLog(String format, Object... args) {
+    return String.format(format, args);
   }
 
   public void clearTarget(String agName) {
@@ -435,21 +687,37 @@ public class PlannedMovement implements MovementStrategy {
   public void moveSucceeded(String agName) {
     try {
       MovementState state = agentStates.get(agName);
-      if (state != null) {
-        state.currentPathIndex++;
+      if (state == null) {
+        debug("[%s] No state found for move success", agName);
+        return;
       }
+
+      state.currentPathIndex++;
+      debug(
+        "[%s] Move succeeded, new path index: %d",
+        agName,
+        state.currentPathIndex
+      );
     } catch (Exception e) {
-      logger.warning("Error in moveSucceeded: " + e.getMessage());
+      logger.warning(
+        String.format("[%s] Error in moveSucceeded: %s", agName, e.getMessage())
+      );
     }
   }
 
   public void moveFailed(String agName) {
     try {
-      if (agName != null) {
-        agentStates.remove(agName);
+      if (agName == null) {
+        logger.warning("Agent name is null in moveFailed");
+        return;
       }
+
+      agentStates.remove(agName);
+      debug("[%s] Move failed, cleared movement state", agName);
     } catch (Exception e) {
-      logger.warning("Error in moveFailed: " + e.getMessage());
+      logger.warning(
+        String.format("[%s] Error in moveFailed: %s", agName, e.getMessage())
+      );
     }
   }
 
@@ -497,7 +765,15 @@ public class PlannedMovement implements MovementStrategy {
     int size,
     String blockDirection
   ) {
-    return search.findPath(start, goal, map, targetType, size, blockDirection);
+    return search.findPath(
+      start,
+      goal,
+      map,
+      targetType,
+      size,
+      blockDirection,
+      Search.PathRecomputeReason.DEFAULT
+    );
   }
 
   public Search.PathResult getFullPathResult(
@@ -517,7 +793,8 @@ public class PlannedMovement implements MovementStrategy {
       map,
       state.targetType,
       size,
-      blockDirection
+      blockDirection,
+      Search.PathRecomputeReason.DEFAULT
     );
   }
 
@@ -529,81 +806,193 @@ public class PlannedMovement implements MovementStrategy {
     String blockDirection
   ) {
     try {
-      // Validate inputs
-      if (state == null || currentPos == null || map == null) {
-        logger.warning(
-          String.format(
-            "Invalid parameters in getPlannedMove: state=%s, pos=%s, map=%s",
-            state != null ? "valid" : "null",
-            currentPos,
-            map != null ? "valid" : "null"
-          )
-        );
+      if (!validatePlannedMoveInputs(state, currentPos, map)) {
+        debug("Invalid inputs for planned move");
         return null;
       }
 
-      // Validate target still exists
+      // Check if target still exists and is valid
       if (!isTargetStillValid(state, map)) {
-        logger.info(
-          String.format(
-            "Target no longer valid: %s of type %s",
-            state.targetPosition,
-            state.targetType
-          )
+        debug(
+          "Target no longer valid: %s of type %s",
+          state.targetPosition,
+          state.targetType
         );
+        clearTarget(state.agentName);
+        return null;
+      }
+
+      // Handle deviation if needed
+      if (state.isDeviating) {
+        debug("Handling deviation for agent %s", state.agentName);
+        return handleDeviation(state, currentPos, map, size, blockDirection);
+      }
+
+      // Use existing path if valid
+      if (!state.needsNewPath() && state.getCurrentStep() != null) {
+        String nextMove = state.getCurrentStep();
+        if (isValidMove(currentPos, nextMove, map, size, blockDirection)) {
+          debug("Using existing path, next move: %s", nextMove);
+          state.currentPathIndex++;
+          return nextMove;
+        }
+      }
+
+      // Recompute path if needed
+      debug("Recomputing path from %s to %s", currentPos, state.targetPosition);
+      return recomputePath(state, currentPos, map, size, blockDirection);
+    } catch (Exception e) {
+      logger.severe(
+        String.format("Critical error in getPlannedMove: %s", e.getMessage())
+      );
+      return null;
+    }
+  }
+
+  private String handleDeviation(
+    MovementState state,
+    Point currentPos,
+    LocalMap map,
+    int size,
+    String blockDirection
+  ) {
+    try {
+      Search.PathResult newPath = search.findPath(
+        currentPos,
+        state.targetPosition,
+        map,
+        state.targetType,
+        size,
+        blockDirection,
+        getRecomputeReason(state)
+      );
+
+      if (newPath == null || !newPath.success) {
+        debug("Deviation path finding failed, clearing state");
         state.plannedPath.clear();
         return null;
       }
 
-      // Recalculate path if needed
-      if (state.needsNewPath()) {
-        if (DEBUG) {
-          logger.info(
-            String.format(
-              "Recalculating path to %s (type: %s) from %s",
-              state.targetPosition,
-              state.targetType,
-              currentPos
-            )
-          );
-        }
-
-        Search.PathResult path = search.findPath(
-          currentPos,
-          state.targetPosition,
-          map,
-          state.targetType,
-          size,
-          blockDirection
-        );
-
-        if (path != null && path.success) {
-          if (path.directions.isEmpty()) {
-            logger.warning("Path found but no directions provided");
-            return null;
-          }
-          state.setNewPath(path.directions);
-        } else {
-          logger.warning(
-            String.format(
-              "Failed to find path to target %s from %s",
-              state.targetPosition,
-              currentPos
-            )
-          );
-          return null;
-        }
-      }
+      state.setNewPath(newPath.directions);
+      state.isDeviating = false;
 
       String nextMove = state.getCurrentStep();
-      if (nextMove == null) {
-        logger.warning("No next move available in current path");
-        state.plannedPath.clear(); // Force recalculation next time
+      if (nextMove != null) {
+        state.currentPathIndex++;
+        return nextMove;
       }
-      return nextMove;
-    } catch (Exception e) {
-      logger.severe("Error in getPlannedMove: " + e.getMessage());
+
       return null;
+    } catch (Exception e) {
+      logger.warning(
+        String.format("Error handling deviation: %s", e.getMessage())
+      );
+      return null;
+    }
+  }
+
+  private String recomputePath(
+    MovementState state,
+    Point currentPos,
+    LocalMap map,
+    int size,
+    String blockDirection
+  ) {
+    try {
+      Search.PathResult path = search.findPath(
+        currentPos,
+        state.targetPosition,
+        map,
+        state.targetType,
+        size,
+        blockDirection,
+        Search.PathRecomputeReason.DEFAULT
+      );
+
+      if (path == null || !path.success) {
+        debug("Path recomputation failed, clearing state");
+        state.plannedPath.clear();
+        return null;
+      }
+
+      state.setNewPath(path.directions);
+      String nextMove = state.getCurrentStep();
+      if (nextMove != null) {
+        state.currentPathIndex++;
+        return nextMove;
+      }
+
+      return null;
+    } catch (Exception e) {
+      logger.warning(
+        String.format("Error recomputing path: %s", e.getMessage())
+      );
+      return null;
+    }
+  }
+
+  private Search.PathRecomputeReason getRecomputeReason(MovementState state) {
+    if (state.deviationAttempts >= MAX_DEVIATION_ATTEMPTS) {
+      return Search.PathRecomputeReason.STUCK;
+    }
+    if (state.isOscillating()) {
+      return Search.PathRecomputeReason.OSCILLATION;
+    }
+    if (System.currentTimeMillis() - state.pathCalculatedTime > PATH_TIMEOUT) {
+      return Search.PathRecomputeReason.PATH_TIMEOUT;
+    }
+    return Search.PathRecomputeReason.DEFAULT;
+  }
+
+  private boolean validatePlannedMoveInputs(
+    MovementState state,
+    Point currentPos,
+    LocalMap map
+  ) {
+    if (state == null) {
+      logWarning("Null movement state");
+      return false;
+    }
+    if (currentPos == null) {
+      logWarning("Null current position");
+      return false;
+    }
+    if (map == null) {
+      logWarning("Null map");
+      return false;
+    }
+    if (state.targetPosition == null) {
+      logWarning("Null target position");
+      return false;
+    }
+    return true;
+  }
+
+  private boolean isValidMove(
+    Point currentPos,
+    String direction,
+    LocalMap map,
+    int size,
+    String blockDirection
+  ) {
+    try {
+      if (direction == null) return false;
+
+      List<String> availableDirections = getValidDirections(
+        "validation",
+        currentPos,
+        map,
+        size,
+        blockDirection,
+        null
+      );
+
+      return availableDirections.contains(direction);
+    } catch (Exception e) {
+      logger.warning(
+        String.format("Error validating move: %s", e.getMessage())
+      );
+      return false;
     }
   }
 
@@ -638,5 +1027,13 @@ public class PlannedMovement implements MovementStrategy {
       default:
         return current;
     }
+  }
+
+  private void logWarning(String message) {
+    logger.warning(message);
+  }
+
+  private void logWarningf(String format, Object... args) {
+    logger.warning(String.format(format, args));
   }
 }

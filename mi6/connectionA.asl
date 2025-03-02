@@ -25,6 +25,13 @@
         .print("Move succeeded in direction: ", Dir);
     }.
 
++step(X):task(TaskID,_,_,[req(0,1,Type)]) & attached(0,1) & goal(0,0) <- submit(TaskID).
+
+//rotating the block
++step(X): goal(0,0) & attached(1,0) <-  rotate(cw).
++step(X): goal(0,0) & attached(-1,0) <- rotate(ccw).
++step(X): goal(0,0) & attached(0,-1) <- rotate(cw).
+
 +step(X) : true & attached(0,1) <- !move_random(goal,2,s).
 +step(X) : true & attached(0,-1) <- !move_random(goal,2,n).
 +step(X) : true & attached(1,0) <- !move_random(goal,2,e).
