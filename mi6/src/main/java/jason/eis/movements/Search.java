@@ -189,7 +189,9 @@ public class Search {
             map,
             current,
             agentSize,
-            blockDirection
+            blockDirection,
+            null,
+            null
           )
           .contains(direction)
       ) {
@@ -387,7 +389,9 @@ public class Search {
       map,
       current,
       agentSize,
-      blockDirection
+      blockDirection,
+      null,
+      null
     );
 
     return validDirs.isEmpty() ? null : validDirs.get(0);

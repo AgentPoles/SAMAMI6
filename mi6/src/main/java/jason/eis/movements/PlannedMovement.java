@@ -4,6 +4,7 @@ import jason.eis.LocalMap;
 import jason.eis.LocalMap.ObstacleInfo;
 import jason.eis.MI6Model;
 import jason.eis.Point;
+import jason.eis.movements.collision.CollisionResolution;
 import java.util.*;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -22,6 +23,10 @@ public class PlannedMovement implements MovementStrategy {
   private static final int LOOKAHEAD_STEPS = 3; // Number of steps to check ahead
   private static final int MAX_DEVIATION_ATTEMPTS = 3; // Max attempts to deviate before full recalc
   private static final double COLLISION_RISK_THRESHOLD = 0.7; // Risk threshold for path deviation
+
+  private final Random random = new Random();
+  private final BoundaryManager boundaryManager = new BoundaryManager();
+  private final ObstacleManager obstacleManager = new ObstacleManager();
 
   private final Search search;
   private final Map<String, MovementState> agentStates;
@@ -233,7 +238,62 @@ public class PlannedMovement implements MovementStrategy {
         return null;
       }
 
-      // Get or calculate the planned move
+      // Start with all possible directions
+      List<String> availableDirections = Arrays.asList("n", "s", "e", "w");
+
+      // Filter through BoundaryManager
+      availableDirections =
+        boundaryManager.filterDirections(
+          availableDirections,
+          map,
+          currentPos,
+          state.targetPosition,
+          state.getCurrentStep()
+        );
+
+      // Filter through ObstacleManager
+      availableDirections =
+        obstacleManager.filterDirections(
+          availableDirections,
+          map,
+          currentPos,
+          size,
+          blockDirection,
+          state.targetPosition,
+          state.getCurrentStep()
+        );
+
+      // Check for collisions first - this takes immediate priority
+      CollisionResolution resolution = collisionHandler.resolveCollision(
+        agName,
+        currentPos,
+        state.getCurrentStep(),
+        map,
+        size,
+        blockDirection,
+        availableDirections
+      );
+
+      if (resolution != null) {
+        // Handle deviation with the collision resolution direction
+        handleDeviation(
+          state,
+          resolution.getDirection(),
+          currentPos,
+          map,
+          size,
+          blockDirection
+        );
+
+        if ("STUCK".equals(resolution.getReason())) {
+          // Force immediate path recalculation
+          state.plannedPath.clear();
+        }
+
+        return resolution.getDirection();
+      }
+
+      // No collision, proceed with normal planned movement
       String plannedMove = getPlannedMove(
         state,
         currentPos,
@@ -241,54 +301,96 @@ public class PlannedMovement implements MovementStrategy {
         size,
         blockDirection
       );
-      if (plannedMove == null) {
-        if (DEBUG) logger.info(
-          "No planned move available for agent: " + agName
+
+      // If planned move is available and valid in available directions, use it
+      if (plannedMove != null && availableDirections.contains(plannedMove)) {
+        state.currentPathIndex++;
+        return plannedMove;
+      }
+
+      // Planned move not valid, choose best available direction and recompute path
+      if (!availableDirections.isEmpty()) {
+        String bestDirection = chooseBestDirection(
+          availableDirections,
+          currentPos,
+          state.targetPosition,
+          map
         );
-        return null;
-      }
-
-      // Convert planned move direction to target Point
-      Point targetPos = calculateNextPosition(currentPos, plannedMove);
-      if (targetPos == null) {
-        logger.warning(
-          "Failed to calculate target position for move: " + plannedMove
+        handleDeviation(
+          state,
+          bestDirection,
+          currentPos,
+          map,
+          size,
+          blockDirection
         );
-        return null;
+        return bestDirection;
       }
 
-      // Handle collision avoidance
-      String resolvedMove = collisionHandler.resolveCollision(
-        agName,
-        currentPos,
-        targetPos,
-        map,
-        false
-      );
-
-      if (resolvedMove != null) {
-        if (!resolvedMove.equals(plannedMove)) {
-          if (DEBUG) {
-            logger.info(
-              String.format(
-                "Move changed from %s to %s due to collision avoidance",
-                plannedMove,
-                resolvedMove
-              )
-            );
-          }
-          handleDeviation(state);
-        } else {
-          state.currentPathIndex++;
-        }
-      } else {
-        logger.warning("Collision handler returned null move");
-      }
-
-      return resolvedMove;
+      return null;
     } catch (Exception e) {
       logger.severe("Error in getNextDirection: " + e.getMessage());
       return null;
+    }
+  }
+
+  private String chooseBestDirection(
+    List<String> availableDirections,
+    Point currentPos,
+    Point target,
+    LocalMap map
+  ) {
+    String bestDir = null;
+    double bestScore = Double.NEGATIVE_INFINITY;
+
+    for (String direction : availableDirections) {
+      Point nextPos = calculateNextPosition(currentPos, direction);
+      double score = -getManhattanDistance(nextPos, target); // Negative because closer is better
+
+      // Add some randomization to break ties
+      score += random.nextDouble() * 0.1;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestDir = direction;
+      }
+    }
+
+    return bestDir != null ? bestDir : availableDirections.get(0);
+  }
+
+  private void handleDeviation(
+    MovementState state,
+    String deviationMove,
+    Point currentPos,
+    LocalMap map,
+    int size,
+    String blockDirection
+  ) {
+    state.deviationAttempts++;
+    state.isDeviating = true;
+
+    // Force path recalculation if we've deviated too many times
+    if (state.deviationAttempts >= MAX_DEVIATION_ATTEMPTS) {
+      state.plannedPath.clear();
+
+      // Recalculate path starting from the deviation
+      Point nextPos = calculateNextPosition(currentPos, deviationMove);
+      Search.PathResult newPath = search.findPath(
+        nextPos,
+        state.targetPosition,
+        map,
+        state.targetType,
+        size,
+        blockDirection
+      );
+
+      if (newPath != null && newPath.success) {
+        List<String> newDirections = new ArrayList<>();
+        newDirections.add(deviationMove);
+        newDirections.addAll(newPath.directions);
+        state.setNewPath(newDirections);
+      }
     }
   }
 
@@ -333,14 +435,6 @@ public class PlannedMovement implements MovementStrategy {
       MovementState state = agentStates.get(agName);
       if (state != null) {
         state.currentPathIndex++;
-        // Record successful move in collision handler
-        LocalMap map = MI6Model.getInstance().getAgentMap(agName);
-        if (map != null) {
-          collisionHandler.recordSuccessfulMove(
-            agName,
-            map.getCurrentPosition()
-          );
-        }
       }
     } catch (Exception e) {
       logger.warning("Error in moveSucceeded: " + e.getMessage());
@@ -523,65 +617,6 @@ public class PlannedMovement implements MovementStrategy {
       logger.warning("Error checking target validity: " + e.getMessage());
       return false;
     }
-  }
-
-  private void handleDeviation(MovementState state) {
-    state.deviationAttempts++;
-    state.isDeviating = true;
-
-    // If we've deviated too many times, force path recalculation
-    if (state.deviationAttempts >= MAX_DEVIATION_ATTEMPTS) {
-      state.plannedPath.clear(); // This will trigger recalculation on next turn
-    }
-  }
-
-  private boolean isPathSegmentBlocked(
-    Point start,
-    List<String> moves,
-    LocalMap map
-  ) {
-    Point current = new Point(start.x, start.y);
-    for (String move : moves) {
-      current = calculateNextPosition(current, move);
-      if (isDynamicallyBlocked(current, map)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private boolean isDynamicallyBlocked(Point pos, LocalMap map) {
-    return map
-      .getDynamicObstacles()
-      .values()
-      .stream()
-      .anyMatch(
-        obstacle -> {
-          Point obstaclePos = obstacle.getPosition();
-          return (
-            obstaclePos.equals(pos) ||
-            (
-              getManhattanDistance(pos, obstaclePos) <= 1 &&
-              calculateCollisionRisk(pos, obstacle) > COLLISION_RISK_THRESHOLD
-            )
-          );
-        }
-      );
-  }
-
-  /**
-   * Calculates risk of collision with a dynamic obstacle
-   */
-  private double calculateCollisionRisk(Point pos, ObstacleInfo obstacle) {
-    // Basic risk calculation based on distance and movement
-    Point obstaclePos = obstacle.getPosition();
-    int distance = getManhattanDistance(pos, obstaclePos);
-
-    // Higher risk for obstacles carrying blocks
-    double baseRisk = obstacle.hasBlock() ? 0.8 : 0.6;
-
-    // Risk decreases with distance
-    return baseRisk / (distance + 1);
   }
 
   /**

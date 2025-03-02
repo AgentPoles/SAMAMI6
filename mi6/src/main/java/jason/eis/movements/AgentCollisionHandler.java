@@ -1,353 +1,202 @@
 package jason.eis.movements;
 
 import jason.eis.LocalMap;
-import jason.eis.LocalMap.ObstacleInfo;
 import jason.eis.Point;
+import jason.eis.movements.collision.CollisionResolution;
+import jason.eis.movements.collision.data.*;
+import jason.eis.movements.collision.handlers.*;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.logging.Logger;
-import java.util.stream.Collectors;
 
 public class AgentCollisionHandler {
-  private static final Logger logger = Logger.getLogger(
-    AgentCollisionHandler.class.getName()
-  );
+  // Constants for collision detection
+  private static final int AWARENESS_ZONE = 4;
+  private static final double CRITICAL_DISTANCE = 1.5;
 
-  // Simplified constants
-  private static final int STUCK_THRESHOLD = 3;
-  private static final int MEMORY_SIZE = 3;
-  private static final int AWARENESS_DISTANCE = 2; // Fixed at 2 cells
-  private static final int OSCILLATION_THRESHOLD = 2;
+  // Shared states
+  private final BaseCollisionState baseState;
+  private final StuckState stuckState;
 
-  private final Map<String, AgentState> agentStates = new ConcurrentHashMap<>();
-  private final Random random = new Random();
+  // Handlers
+  private final StuckHandler stuckHandler;
 
-  public static class AgentState {
-    Point lastPosition;
-    int stuckCount = 0;
-    List<Point> moveHistory = new ArrayList<>();
-    List<String> directionHistory = new ArrayList<>();
-    Set<String> failedDirections = new HashSet<>();
-    private long lastUpdateTime;
-
-    void recordMove(Point position, String direction) {
-      lastUpdateTime = System.currentTimeMillis();
-
-      if (moveHistory.size() >= MEMORY_SIZE) {
-        moveHistory.remove(0);
-        directionHistory.remove(0);
-      }
-      moveHistory.add(position);
-      directionHistory.add(direction);
-
-      logger.severe(
-        String.format(
-          "Agent Movement - Position: %s, Direction: %s",
-          position,
-          direction
-        )
-      );
-      logger.severe(String.format("Movement History: %s", moveHistory));
-      logger.severe(String.format("Direction History: %s", directionHistory));
-
-      if (isOscillating()) {
-        logger.warning(
-          String.format(
-            "OSCILLATION DETECTED at %s with pattern: %s",
-            position,
-            directionHistory
-          )
-        );
-      }
-
-      if (lastPosition != null && lastPosition.equals(position)) {
-        stuckCount++;
-        if (direction != null) {
-          failedDirections.add(direction);
-          logger.severe(
-            String.format(
-              "Failed movement in direction: %s, Total failed: %s",
-              direction,
-              failedDirections
-            )
-          );
-        }
-        logger.severe(
-          String.format(
-            "STUCK DETECTED at %s for %d moves. Failed directions: %s",
-            position,
-            stuckCount,
-            failedDirections
-          )
-        );
-      } else {
-        if (stuckCount > 0) {
-          logger.severe(
-            String.format(
-              "UNSTUCK from position %s after %d moves",
-              lastPosition,
-              stuckCount
-            )
-          );
-        }
-        stuckCount = 0;
-        failedDirections.clear();
-      }
-
-      lastPosition = position;
-    }
-
-    boolean isStuck() {
-      return stuckCount >= STUCK_THRESHOLD;
-    }
-
-    boolean isOscillating() {
-      if (moveHistory.size() < MEMORY_SIZE) return false;
-      // Check if we're repeating the same positions
-      return new HashSet<>(moveHistory).size() <= 2;
-    }
-
-    String getLastDirection() {
-      return directionHistory.isEmpty()
-        ? null
-        : directionHistory.get(directionHistory.size() - 1);
-    }
-
-    boolean isStale() {
-      return System.currentTimeMillis() - lastUpdateTime > 5000; // 5 second timeout
-    }
+  public AgentCollisionHandler() {
+    this.baseState = new BaseCollisionState();
+    this.stuckState = new StuckState();
+    this.stuckHandler = new StuckHandler(baseState, stuckState);
   }
 
-  public void recordMove(String agName, Point position, String direction) {
-    AgentState state = agentStates.computeIfAbsent(
-      agName,
-      k -> new AgentState()
-    );
-    state.recordMove(position, direction);
-  }
-
-  public void recordSuccessfulMove(String agentName, Point newPosition) {
-    recordMove(agentName, newPosition, null);
-  }
-
-  public void recordFailedMove(
-    String agName,
-    Point position,
-    String attemptedDirection
-  ) {
-    logger.severe(
-      String.format(
-        "Agent %s: Failed move to %s, direction: %s",
-        agName,
-        position,
-        attemptedDirection
-      )
-    );
-
-    Point attemptedPos = calculateNextPosition(position, attemptedDirection);
-    logger.severe(
-      String.format(
-        "Move failure analysis - Attempted position: %s",
-        attemptedPos
-      )
-    );
-
-    AgentState state = agentStates.computeIfAbsent(
-      agName,
-      k -> new AgentState()
-    );
-    state.recordMove(position, attemptedDirection);
-  }
-
-  public String resolveCollision(
-    String agName,
+  /**
+   * Main method to handle collisions and provide resolution
+   * @param agentId The agent requesting collision resolution
+   * @param currentPos Current position of the agent
+   * @param intendedDirection Direction the agent wants to move
+   * @param map Current state of the environment
+   * @param size Size of the agent (1 for single, 2+ for block attached)
+   * @param blockAttachment Direction of block attachment if any
+   * @param availableDirections List of available directions for the agent
+   * @return Resolved direction or null if no resolution needed
+   */
+  public CollisionResolution resolveCollision(
+    String agentId,
     Point currentPos,
-    Point intendedMove,
+    String intendedDirection,
     LocalMap map,
-    boolean hasBlock
+    int size,
+    String blockAttachment,
+    List<String> availableDirections
   ) {
-    AgentState state = agentStates.get(agName);
-    if (state == null) return null;
+    // Update states first
+    updateState(agentId, currentPos, intendedDirection, size, blockAttachment);
 
-    List<String> availableDirections = getAvailableDirections(currentPos, map);
-    if (availableDirections.isEmpty()) {
-      logger.warning(
-        String.format("Agent %s: NO AVAILABLE MOVES at %s", agName, currentPos)
-      );
-      return null;
-    }
-
-    // Log the current situation
-    logger.warning(
-      String.format(
-        "\nAgent %s: COLLISION RESOLUTION NEEDED at %s (has block: %b)",
-        agName,
+    // Check if agent is stuck
+    if (stuckState.isStuck(agentId)) {
+      List<String> availableDirs = getAvailableDirections(
+        map,
         currentPos,
-        hasBlock
-      )
-    );
-    logger.warning(
-      String.format("Available directions: %s", availableDirections)
-    );
-    logger.warning(String.format("Intended move: %s", intendedMove));
-
-    Map<Point, ObstacleInfo> nearbyAgents = getNearbyAgents(currentPos, map);
-    logger.warning(String.format("Nearby agents: %s", nearbyAgents.keySet()));
-
-    // Handle stuck situation first
-    if (state.isStuck() || state.isOscillating()) {
-      logger.warning(
-        String.format(
-          "Agent %s: ATTEMPTING RECOVERY from stuck/oscillation",
-          agName
-        )
+        size,
+        blockAttachment
       );
-      String recoveryMove = getRecoveryMove(
-        state,
-        currentPos,
-        availableDirections,
-        map
+      String resolvedDirection = stuckHandler.resolveStuck(
+        agentId,
+        map,
+        availableDirs
       );
-      if (recoveryMove != null) {
-        logger.warning(String.format("Recovery move chosen: %s", recoveryMove));
-        return recoveryMove;
+
+      if (resolvedDirection != null) {
+        return new CollisionResolution(resolvedDirection, "STUCK");
       }
     }
 
-    // Try to follow intended direction if safe
-    if (intendedMove != null) {
-      String intendedDir = getDirectionFromPoints(currentPos, intendedMove);
-      if (intendedDir != null && availableDirections.contains(intendedDir)) {
-        Point nextPos = calculateNextPosition(currentPos, intendedDir);
-        if (!hasImmediateCollision(nextPos, map)) {
-          logger.info(
-            String.format("Following intended direction: %s", intendedDir)
-          );
-          return intendedDir;
+    // No collision detected
+    return null;
+  }
+
+  private void updateState(
+    String agentId,
+    Point position,
+    String intendedDirection,
+    int size,
+    String blockAttachment
+  ) {
+    baseState.updateAgentState(agentId, size, blockAttachment);
+    stuckHandler.updateState(agentId, position, intendedDirection);
+  }
+
+  private List<String> getAvailableDirections(
+    LocalMap map,
+    Point pos,
+    int size,
+    String blockAttachment
+  ) {
+    List<String> available = new ArrayList<>();
+
+    // Check each cardinal direction
+    for (String dir : Arrays.asList("n", "s", "e", "w")) {
+      if (isDirectionAvailable(map, pos, dir, size, blockAttachment)) {
+        available.add(dir);
+      }
+    }
+
+    return available;
+  }
+
+  private boolean isDirectionAvailable(
+    LocalMap map,
+    Point pos,
+    String direction,
+    int size,
+    String blockAttachment
+  ) {
+    Point nextPos = calculateNextPosition(pos, direction);
+
+    // Basic checks
+    if (map.isOutOfBounds(nextPos) || map.hasObstacle(nextPos)) {
+      return false;
+    }
+
+    // Size and attachment checks
+    if (size > 1 || blockAttachment != null) {
+      // Check if movement would cause block rotation
+      if (
+        blockAttachment != null && !isValidBlockMove(direction, blockAttachment)
+      ) {
+        // Additional space needed for rotation
+        if (!hasRotationSpace(map, pos, direction)) {
+          return false;
+        }
+      }
+
+      // Check space for larger size
+      for (Point occupiedPoint : getOccupiedPoints(nextPos, size, direction)) {
+        if (
+          map.isOutOfBounds(occupiedPoint) || map.hasObstacle(occupiedPoint)
+        ) {
+          return false;
         }
       }
     }
 
-    // Choose safest available direction
-    String safeDir = findSafestDirection(currentPos, availableDirections, map);
-    logger.warning(String.format("Chose safest direction: %s", safeDir));
-    return safeDir;
+    return true;
   }
 
-  private String getRecoveryMove(
-    AgentState state,
-    Point currentPos,
-    List<String> availableDirections,
-    LocalMap map
+  private boolean isValidBlockMove(
+    String moveDirection,
+    String blockAttachment
   ) {
-    String lastDir = state.getLastDirection();
-    logger.warning(
-      String.format(
-        "Recovery attempt - Last direction: %s, Failed directions: %s",
-        lastDir,
-        state.failedDirections
-      )
-    );
-
-    if (lastDir != null) {
-      String oppositeDir = getOppositeDirection(lastDir);
-      Point nextPos = calculateNextPosition(currentPos, oppositeDir);
-      boolean isOppositeAvailable = availableDirections.contains(oppositeDir);
-      boolean isOppositeCollision = hasImmediateCollision(nextPos, map);
-
-      logger.warning(
-        String.format(
-          "Opposite direction %s - Available: %b, Will collide: %b",
-          oppositeDir,
-          isOppositeAvailable,
-          isOppositeCollision
-        )
-      );
-
-      if (isOppositeAvailable && !isOppositeCollision) {
-        return oppositeDir;
-      }
+    // Moving parallel to attachment or in attachment direction is valid
+    switch (blockAttachment) {
+      case "n":
+      case "s":
+        return moveDirection.equals("n") || moveDirection.equals("s");
+      case "e":
+      case "w":
+        return moveDirection.equals("e") || moveDirection.equals("w");
+      default:
+        return true;
     }
-
-    List<String> safeDirections = availableDirections
-      .stream()
-      .filter(dir -> !state.failedDirections.contains(dir))
-      .collect(Collectors.toList());
-
-    logger.warning(
-      String.format("Safe directions available: %s", safeDirections)
-    );
-
-    if (!safeDirections.isEmpty()) {
-      String chosen = safeDirections.get(random.nextInt(safeDirections.size()));
-      logger.warning(String.format("Chose random safe direction: %s", chosen));
-      return chosen;
-    }
-
-    String fallback = availableDirections.get(
-      random.nextInt(availableDirections.size())
-    );
-    logger.warning(
-      String.format("No safe directions, falling back to random: %s", fallback)
-    );
-    return fallback;
   }
 
-  private Map<Point, ObstacleInfo> getNearbyAgents(Point pos, LocalMap map) {
-    Map<Point, ObstacleInfo> nearby = map
-      .getDynamicObstacles()
-      .entrySet()
-      .stream()
-      .filter(e -> getManhattanDistance(pos, e.getKey()) <= AWARENESS_DISTANCE)
-      .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-
-    logger.warning(
-      String.format(
-        "Nearby agents around %s (distance %d): %s",
-        pos,
-        AWARENESS_DISTANCE,
-        nearby.keySet()
-      )
-    );
-    return nearby;
-  }
-
-  private boolean hasImmediateCollision(Point pos, LocalMap map) {
-    return !getNearbyAgents(pos, map).isEmpty();
-  }
-
-  private String findSafestDirection(
-    Point currentPos,
-    List<String> availableDirections,
-    LocalMap map
-  ) {
-    String bestDir = null;
-    int minNearbyAgents = Integer.MAX_VALUE;
-
-    for (String dir : availableDirections) {
-      Point nextPos = calculateNextPosition(currentPos, dir);
-      int nearbyAgents = getNearbyAgents(nextPos, map).size();
-
-      if (nearbyAgents < minNearbyAgents) {
-        minNearbyAgents = nearbyAgents;
-        bestDir = dir;
-      }
-    }
-    return bestDir != null ? bestDir : availableDirections.get(0);
-  }
-
-  // Helper methods
-  private List<String> getAvailableDirections(Point currentPos, LocalMap map) {
-    return Arrays
-      .asList("n", "s", "e", "w")
-      .stream()
-      .filter(
-        dir -> {
-          Point next = calculateNextPosition(currentPos, dir);
-          return !map.hasObstacle(next) && !map.isOutOfBounds(next);
+  private boolean hasRotationSpace(LocalMap map, Point pos, String direction) {
+    // Check 3x3 area around next position for rotation space
+    Point nextPos = calculateNextPosition(pos, direction);
+    for (int dx = -1; dx <= 1; dx++) {
+      for (int dy = -1; dy <= 1; dy++) {
+        Point checkPos = new Point(nextPos.x + dx, nextPos.y + dy);
+        if (map.isOutOfBounds(checkPos) || map.hasObstacle(checkPos)) {
+          return false;
         }
-      )
-      .collect(Collectors.toList());
+      }
+    }
+    return true;
+  }
+
+  private List<Point> getOccupiedPoints(
+    Point basePos,
+    int size,
+    String direction
+  ) {
+    List<Point> points = new ArrayList<>();
+    points.add(basePos);
+
+    if (size > 1) {
+      // Add additional points based on size and direction
+      switch (direction) {
+        case "n":
+          points.add(new Point(basePos.x, basePos.y - 1));
+          break;
+        case "s":
+          points.add(new Point(basePos.x, basePos.y + 1));
+          break;
+        case "e":
+          points.add(new Point(basePos.x + 1, basePos.y));
+          break;
+        case "w":
+          points.add(new Point(basePos.x - 1, basePos.y));
+          break;
+      }
+    }
+
+    return points;
   }
 
   private Point calculateNextPosition(Point current, String direction) {
@@ -365,38 +214,8 @@ public class AgentCollisionHandler {
     }
   }
 
-  private String getDirectionFromPoints(Point from, Point to) {
-    if (to.x > from.x) return "e";
-    if (to.x < from.x) return "w";
-    if (to.y > from.y) return "s";
-    if (to.y < from.y) return "n";
-    return null;
-  }
-
-  private String getOppositeDirection(String direction) {
-    switch (direction) {
-      case "n":
-        return "s";
-      case "s":
-        return "n";
-      case "e":
-        return "w";
-      case "w":
-        return "e";
-      default:
-        return null;
-    }
-  }
-
-  private int getManhattanDistance(Point p1, Point p2) {
-    return Math.abs(p1.x - p2.x) + Math.abs(p1.y - p2.y);
-  }
-
-  private boolean isNearBoundary(Point pos, LocalMap map) {
-    boolean isBoundary = map.isOutOfBounds(pos);
-    if (isBoundary) {
-      logger.severe(String.format("Boundary detected at position: %s", pos));
-    }
-    return isBoundary;
+  public void resetState(String agentId) {
+    baseState.resetAgentState(agentId);
+    stuckState.resetStuckState(agentId);
   }
 }

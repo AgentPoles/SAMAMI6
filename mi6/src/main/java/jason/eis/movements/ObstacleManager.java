@@ -3,6 +3,8 @@ package jason.eis.movements;
 import jason.eis.LocalMap;
 import jason.eis.Point;
 import java.util.*;
+import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 public class ObstacleManager {
   private static final double BLOCK_BUFFER = 2.0; // Extra space around blocks
@@ -11,6 +13,10 @@ public class ObstacleManager {
   // Cache for frequently used calculations
   private final Map<String, Point> directionOffsets;
   private final Map<Integer, Set<Point>> agentSizeCache;
+
+  private static final Logger logger = Logger.getLogger(
+    ObstacleManager.class.getName()
+  );
 
   public ObstacleManager() {
     // Initialize direction offset cache
@@ -30,18 +36,62 @@ public class ObstacleManager {
   public List<String> filterDirections(
     List<String> availableDirections,
     LocalMap map,
-    Point agentPos,
-    int agentSize,
-    String blockDirection
+    Point currentPos,
+    int size,
+    String blockDirection,
+    Point previousPos,
+    String previousMove
   ) {
-    // Use ArrayList for better performance than stream
-    List<String> validDirections = new ArrayList<>();
-    for (String dir : availableDirections) {
-      if (isValidMove(dir, agentPos, agentSize, blockDirection, map)) {
-        validDirections.add(dir);
+    if (availableDirections.isEmpty()) {
+      return availableDirections;
+    }
+
+    // First try normal filtering
+    List<String> filteredDirections = availableDirections
+      .stream()
+      .filter(
+        dir -> isDirectionSafe(map, currentPos, dir, size, blockDirection)
+      )
+      .collect(Collectors.toList());
+
+    // If we have valid directions, return them
+    if (!filteredDirections.isEmpty()) {
+      return filteredDirections;
+    }
+
+    // If we're stuck and have a previous move
+    if (
+      previousPos != null &&
+      currentPos.equals(previousPos) &&
+      previousMove != null
+    ) {
+      logger.info(
+        "All directions filtered out and agent is stuck. Using optimistic filtering."
+      );
+
+      // Remove the previous move that got us stuck
+      List<String> optimisticDirections = new ArrayList<>(availableDirections);
+      optimisticDirections.remove(previousMove);
+
+      if (!optimisticDirections.isEmpty()) {
+        logger.info(
+          "Allowing potentially risky directions: " + optimisticDirections
+        );
+        return optimisticDirections;
       }
     }
-    return validDirections;
+
+    // If all else fails, return all directions except previous move
+    logger.info(
+      "Falling back to all available directions except previous move"
+    );
+    List<String> fallbackDirections = new ArrayList<>(availableDirections);
+    if (previousMove != null) {
+      fallbackDirections.remove(previousMove);
+    }
+    return fallbackDirections.isEmpty()
+      ? availableDirections
+      : fallbackDirections;
   }
 
   /**
@@ -270,5 +320,17 @@ public class ObstacleManager {
     return offset != null
       ? new Point(current.x + offset.x, current.y + offset.y)
       : current;
+  }
+
+  private boolean isDirectionSafe(
+    LocalMap map,
+    Point currentPos,
+    String direction,
+    int size,
+    String blockDirection
+  ) {
+    // Implement the logic to determine if a direction is safe
+    // This is a placeholder and should be replaced with the actual implementation
+    return true; // Placeholder return, actual implementation needed
   }
 }

@@ -30,12 +30,6 @@ public class AddMovementFailure extends DefaultInternalAction {
         return false;
       }
 
-      collisionHandler.recordFailedMove(
-        agName,
-        map.getCurrentPosition(),
-        attemptedDirection
-      );
-
       switch (failureType) {
         case "failed_forbidden":
           logger.info("Agent " + agName + " hit boundary");

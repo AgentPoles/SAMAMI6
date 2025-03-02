@@ -7,6 +7,7 @@ import jason.eis.LocalMap.ObstacleInfo;
 import jason.eis.MI6Model;
 import jason.eis.Point;
 import jason.eis.movements.ObstacleMemory;
+import jason.eis.movements.collision.CollisionResolution;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
@@ -118,6 +119,7 @@ public class RandomMovement implements MovementStrategy {
 
   private final Exploration exploration = new Exploration();
   private final ObstacleManager obstacleManager = new ObstacleManager();
+  private final BoundaryManager boundaryManager = new BoundaryManager();
 
   private class DirectionMemory {
     private final Deque<String> lastMoves = new ArrayDeque<>(MEMORY_SIZE);
@@ -266,6 +268,10 @@ public class RandomMovement implements MovementStrategy {
     boolean isStuck() {
       return stuckCount >= 3;
     }
+
+    Point getLastPosition() {
+      return lastPosition;
+    }
   }
 
   private static class StaticObstacleInfo {
@@ -361,117 +367,74 @@ public class RandomMovement implements MovementStrategy {
     Point currentPos = map.getCurrentPosition();
     if (currentPos == null) return null;
 
-    if (DEBUG) {
-      logger.info(
-        String.format(
-          "[%s] CHECKING MOVES - Current position: %s, Known boundaries: %s",
-          agName,
-          currentPos,
-          map.getConfirmedBoundariesPositions()
-        )
+    // Get memory once at the start
+    DirectionMemory memory = directionMemory.computeIfAbsent(
+      agName,
+      k -> new DirectionMemory()
+    );
+
+    Point previousPos = memory.getLastPosition();
+    String previousMove = memory.getLastDirection();
+
+    // Start with all possible directions
+    List<String> availableDirections = Arrays.asList("n", "s", "e", "w");
+
+    // First filter by boundaries with fallback
+    availableDirections =
+      boundaryManager.filterDirections(
+        availableDirections,
+        map,
+        currentPos,
+        previousPos,
+        previousMove
       );
-    }
 
-    List<String> availableDirections = Arrays
-      .asList("n", "s", "e", "w")
-      .stream()
-      .filter(
-        dir -> {
-          Point next = calculateNextPosition(currentPos, dir);
-          boolean forbidden = map.isForbidden(next);
-
-          if (DEBUG && forbidden) {
-            logger.info(
-              String.format(
-                "[%s] FORBIDDEN MOVE - Direction %s to %s is forbidden",
-                agName,
-                dir,
-                next
-              )
-            );
-          }
-
-          return !forbidden;
-        }
-      )
-      .collect(Collectors.toList());
-
-    // Filter directions considering size and block
+    // Then filter by obstacles with fallback
     availableDirections =
       obstacleManager.filterDirections(
         availableDirections,
         map,
         currentPos,
         size,
-        blockDirection
+        blockDirection,
+        previousPos,
+        previousMove
       );
 
-    // Handle boundary case when no directions are available
-    if (availableDirections.isEmpty()) {
-      DirectionMemory memory = directionMemory.computeIfAbsent(
-        agName,
-        k -> new DirectionMemory()
-      );
-      Map<String, Point> boundaries = map.getConfirmedBoundariesPositions();
+    // Now check for collisions with valid directions
+    CollisionResolution collisionResolution = collisionHandler.resolveCollision(
+      agName,
+      currentPos,
+      memory.getLastDirection(),
+      map,
+      size,
+      blockDirection,
+      availableDirections
+    );
 
-      if (!boundaries.isEmpty()) {
-        // Try opposite direction of boundary first
-        for (String boundaryDir : boundaries.keySet()) {
-          String oppositeDir = getOppositeDirection(boundaryDir);
-          if (isMovePossible(map, currentPos, oppositeDir)) {
-            logger.info(
-              String.format(
-                "[%s] Attempting boundary escape: trying opposite direction %s",
-                agName,
-                oppositeDir
-              )
-            );
-            memory.recoveryAttempts++;
-            return oppositeDir;
-          }
-        }
+    if (collisionResolution != null) {
+      String resolvedDirection = collisionResolution.getDirection();
+      memory.addMove(resolvedDirection, currentPos);
 
-        // If opposite fails, try perpendicular directions
-        for (String boundaryDir : boundaries.keySet()) {
-          List<String> perpendicularDirs = getPerpendicularDirections(
-            boundaryDir
-          );
-          for (String dir : perpendicularDirs) {
-            if (isMovePossible(map, currentPos, dir)) {
-              logger.info(
-                String.format(
-                  "[%s] Attempting boundary escape: trying perpendicular direction %s",
-                  agName,
-                  dir
-                )
-              );
-              memory.recoveryAttempts++;
-              return dir;
-            }
-          }
-        }
-
-        // If we've tried multiple times without success, delegate to collision handler
-        if (memory.recoveryAttempts >= 3) {
-          logger.info(
-            String.format(
-              "[%s] Boundary recovery failed after %d attempts, delegating to collision handler",
-              agName,
-              memory.recoveryAttempts
-            )
-          );
-          return handleCollision(
-            agName,
-            currentPos,
-            map,
-            blockDirection != null
-          );
-        }
+      if ("STUCK".equals(collisionResolution.getReason())) {
+        exploration.triggerPathRecompute(
+          agName,
+          calculateNextPosition(currentPos, resolvedDirection),
+          map,
+          RecomputeReason.STUCK
+        );
       }
+
+      return resolvedDirection;
     }
 
-    // Use regular direction selection if we have available directions
-    return chooseDirection(currentPos, availableDirections, map);
+    // If no collision detected and we have available directions, choose direction
+    if (!availableDirections.isEmpty()) {
+      return chooseDirection(currentPos, availableDirections, map);
+    }
+
+    // No available directions, return null
+    return null;
   }
 
   private String chooseDirection(
@@ -1488,13 +1451,17 @@ public class RandomMovement implements MovementStrategy {
     LocalMap map,
     boolean hasBlock
   ) {
-    return collisionHandler.resolveCollision(
+    List<String> availableDirections = Arrays.asList("n", "s", "e", "w");
+    CollisionResolution resolution = collisionHandler.resolveCollision(
       agName,
       currentPos,
       null,
       map,
-      hasBlock
+      hasBlock ? 2 : 1,
+      null,
+      availableDirections
     );
+    return resolution != null ? resolution.getDirection() : null;
   }
 
   private RecomputeReason checkRecomputePath(
