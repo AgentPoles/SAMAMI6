@@ -19,7 +19,7 @@ public class PlannedMovement implements MovementStrategy {
   private static final int MAX_TARGETS_TO_CHECK = 5;
 
   // Dynamic obstacle handling constants
-  private static final int CRITICAL_DISTANCE = 2; // Distance to react to agents
+  private static final int CRITICAL_DISTANCE = 1; // Distance to react to agents
   private static final int LOOKAHEAD_STEPS = 3; // Number of steps to check ahead
   private static final int MAX_DEVIATION_ATTEMPTS = 3; // Max attempts to deviate before full recalc
   private static final double COLLISION_RISK_THRESHOLD = 0.7; // Risk threshold for path deviation

@@ -26,4 +26,4 @@ mi6/movements.asl
 mi6/pathfinding.asl
 mi6/tasks.asl
 mi6/coordination.asl
-mi6/connectionA.asl
+mi6/build/*

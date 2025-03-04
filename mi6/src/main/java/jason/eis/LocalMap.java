@@ -45,8 +45,8 @@ public class LocalMap {
 
   private final Map<Point, ObstacleInfo> dynamicObstacles = new ConcurrentHashMap<>();
   private static final int DYNAMIC_OBSTACLE_TTL = 3000; // 3 seconds time-to-live
-  public static final int CRITICAL_DISTANCE = 2; // Distance where obstacles become critical to avoid
-  public static final int AWARENESS_DISTANCE = 5; // Max distance to track obstacles
+  public static final int CRITICAL_DISTANCE = 1; // Distance where obstacles become critical to avoid
+  public static final int AWARENESS_DISTANCE = 2; // Max distance to track obstacles
 
   private Point mapMinBounds = null;
   private Point mapMaxBounds = null;
@@ -1449,6 +1449,10 @@ public class LocalMap {
   }
 
   public boolean hasObstacle(Point pos) {
+    return (staticObstacles.containsKey(pos));
+  }
+
+  public boolean hasStaticOrDynamicObstacle(Point pos) {
     return (
       staticObstacles.containsKey(pos) || dynamicObstacles.containsKey(pos)
     );

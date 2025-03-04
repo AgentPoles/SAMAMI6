@@ -13,10 +13,10 @@ public class OscillationHandler {
   );
   private static final boolean DEBUG = true;
   private static final int AGENT_PROXIMITY_RANGE = 1;
-  private static final double DIRECTION_WEIGHT = 0.6;
-  private static final double DISTANCE_WEIGHT = 0.4;
-  private static final int YIELD_THRESHOLD = 3; // Number of oscillations before yielding
-  private static final long YIELD_DURATION = 1000; // Time to yield in milliseconds
+  private static final double DIRECTION_WEIGHT = 0.7;
+  private static final double DISTANCE_WEIGHT = 0.3;
+  private static final int YIELD_THRESHOLD = 4; // Number of oscillations before yielding
+  private static final long YIELD_DURATION = 500; // Time to yield in milliseconds
   private final Random random = new Random();
   private long lastYieldTime = 0;
   private int oscillationCount = 0;
@@ -194,7 +194,7 @@ public class OscillationHandler {
 
     // Penalize oscillating directions more severely with multiple agents
     if (localMap.getOscillatingDirections().contains(direction)) {
-      score *= Math.pow(0.7, Math.min(agentCount, 3));
+      score *= Math.pow(0.8, Math.min(agentCount, 3));
     }
 
     // Block attachment constraints

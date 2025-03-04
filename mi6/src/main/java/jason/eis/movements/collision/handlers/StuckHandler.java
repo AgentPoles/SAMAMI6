@@ -9,9 +9,9 @@ import java.util.*;
 public class StuckHandler {
   private final Random random = new Random();
   private static final int AGENT_PROXIMITY_RANGE = 1;
-  private static final double DIRECTION_SCORE_THRESHOLD = 0.7;
-  private static final int YIELD_THRESHOLD = 3;
-  private static final long YIELD_DURATION = 1000;
+  private static final double DIRECTION_SCORE_THRESHOLD = 0.5;
+  private static final int YIELD_THRESHOLD = 4;
+  private static final long YIELD_DURATION = 500;
   private long lastYieldTime = 0;
   private int stuckCount = 0;
 
@@ -166,7 +166,10 @@ public class StuckHandler {
     for (int dx = -1; dx <= 1; dx++) {
       for (int dy = -1; dy <= 1; dy++) {
         Point checkPos = new Point(nextPos.x + dx, nextPos.y + dy);
-        if (map.hasObstacle(checkPos) || map.isOutOfBounds(checkPos)) {
+        if (
+          map.hasStaticOrDynamicObstacle(checkPos) ||
+          map.isOutOfBounds(checkPos)
+        ) {
           return false;
         }
       }
@@ -346,13 +349,13 @@ public class StuckHandler {
 
       // Stronger penalty for moving towards agents
       if (nextDistance < currentDistance) {
-        score *= 0.4; // More aggressive penalty
+        score *= 0.7; // Less aggressive penalty
       }
 
       // Progressive penalty based on proximity
       if (nextDistance <= AGENT_PROXIMITY_RANGE) {
         double proximityFactor = nextDistance / AGENT_PROXIMITY_RANGE;
-        score *= (0.5 + (0.5 * proximityFactor)); // More nuanced scaling
+        score *= (0.7 + (0.3 * proximityFactor)); // Less aggressive scaling
       }
 
       // Consider agent's predicted movement

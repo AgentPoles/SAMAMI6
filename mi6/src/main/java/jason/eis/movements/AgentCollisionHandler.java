@@ -170,7 +170,7 @@ public class AgentCollisionHandler {
     Point nextPos = calculateNextPosition(pos, direction);
 
     // Basic checks
-    if (map.isOutOfBounds(nextPos) || map.hasObstacle(nextPos)) {
+    if (map.isOutOfBounds(nextPos) || map.hasStaticOrDynamicObstacle(nextPos)) {
       return false;
     }
 
@@ -189,7 +189,8 @@ public class AgentCollisionHandler {
       // Check space for larger size
       for (Point occupiedPoint : getOccupiedPoints(nextPos, size, direction)) {
         if (
-          map.isOutOfBounds(occupiedPoint) || map.hasObstacle(occupiedPoint)
+          map.isOutOfBounds(occupiedPoint) ||
+          map.hasStaticOrDynamicObstacle(occupiedPoint)
         ) {
           return false;
         }
@@ -222,7 +223,10 @@ public class AgentCollisionHandler {
     for (int dx = -1; dx <= 1; dx++) {
       for (int dy = -1; dy <= 1; dy++) {
         Point checkPos = new Point(nextPos.x + dx, nextPos.y + dy);
-        if (map.isOutOfBounds(checkPos) || map.hasObstacle(checkPos)) {
+        if (
+          map.isOutOfBounds(checkPos) ||
+          map.hasStaticOrDynamicObstacle(checkPos)
+        ) {
           return false;
         }
       }

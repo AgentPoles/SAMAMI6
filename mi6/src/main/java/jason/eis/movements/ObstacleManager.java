@@ -13,7 +13,7 @@ public class ObstacleManager {
     ObstacleManager.class.getName()
   );
   private static final boolean DEBUG = true;
-  private static final double BLOCK_BUFFER = 2.0; // Extra space around blocks
+  private static final double BLOCK_BUFFER = 1.0; // Reduced from 2.0
   private static final int CRITICAL_DISTANCE = 1;
 
   // Cache for frequently used calculations

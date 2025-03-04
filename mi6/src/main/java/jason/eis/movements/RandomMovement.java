@@ -30,7 +30,7 @@ public class RandomMovement implements MovementStrategy {
   private static final double ZONE_WEIGHT = 0.5;
 
   // Use AgentCollisionHandler's constants instead
-  private static final int AWARENESS_ZONE = 4;
+  private static final int AWARENESS_ZONE = 1;
 
   private final Random random = new Random();
   private final AgentCollisionHandler collisionHandler;

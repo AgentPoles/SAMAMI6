@@ -38,6 +38,7 @@
 +step(X) : attached(1,0) & not carryingBlock <- detach(w).
 +step(X) : attached(-1,0) & not carryingBlock <- detach(n).
 
+
 +step(X) : true & attached(0,1) & carryingBlock <- !move_random(goal,2,s).
 +step(X) : true & attached(0,-1) & carryingBlock <- !move_random(goal,2,n).
 +step(X) : true & attached(1,0) & carryingBlock <- !move_random(goal,2,e).
@@ -55,6 +56,7 @@
 +step(X) : thing(0,1,dispenser,_) & not attached(_,_) <- request(s).
 +step(X) : thing(-1,0,dispenser,_) & not attached(_,_) <- request(w).
 +step(X) : thing(0,-1,dispenser,_) & not attached(_,_) <- request(n).
+
 
 // Step handling with debug
 +step(X) : true <-
@@ -85,3 +87,5 @@
 -!G[error(Error), error_msg(Msg)] : true <- 
     .print("UNHANDLED ERROR: ", G, " failed with ", Error, " - ", Msg).
 
+
+    
