@@ -29,6 +29,7 @@ public class EISAdapter extends Environment implements AgentListener {
 
   private EnvironmentInterfaceStandard ei;
   private MI6Model model;
+  private Set<String> initializedAgents = new HashSet<>(); // Track initialized agents
 
   public EISAdapter() {
     super(20);
@@ -37,15 +38,14 @@ public class EISAdapter extends Environment implements AgentListener {
   @Override
   public void init(String[] args) {
     ei = new EnvironmentInterface("conf/eismassimconfig.json");
+
     try {
       ei.start();
-      // Initialize model after ei is created
       model = new MI6Model(ei);
     } catch (ManagementException e) {
       e.printStackTrace();
     }
 
-    // Add environment listener
     ei.attachEnvironmentListener(
       new EnvironmentListener() {
 
@@ -61,15 +61,20 @@ public class EISAdapter extends Environment implements AgentListener {
       }
     );
 
-    // Register agents
     for (String e : ei.getEntities()) {
       System.out.println("Register agent " + e);
 
       try {
         ei.registerAgent(e);
-        ei.attachAgentListener(e, this);
+      } catch (AgentException e1) {
+        e1.printStackTrace();
+      }
+
+      ei.attachAgentListener(e, this);
+
+      try {
         ei.associateEntity(e, e);
-      } catch (Exception e1) {
+      } catch (RelationException e1) {
         e1.printStackTrace();
       }
     }
@@ -80,6 +85,13 @@ public class EISAdapter extends Environment implements AgentListener {
 
   @Override
   public List<Literal> getPercepts(String agName) {
+    // Initialize agent if not already done
+    if (!initializedAgents.contains(agName)) {
+      model.initializeAgent(agName);
+      initializedAgents.add(agName);
+      logger.info("Initialized agent: " + agName);
+    }
+
     Collection<Literal> ps = super.getPercepts(agName);
     List<Literal> percepts = ps == null
       ? new ArrayList<>()
@@ -98,70 +110,35 @@ public class EISAdapter extends Environment implements AgentListener {
           for (Percept p : perMap.get(entity)) {
             try {
               percepts.add(perceptToLiteral(p).addAnnots(strcEnt));
-            } catch (Exception e) {
-              logger.warning("Error converting percept: " + e.getMessage());
+            } catch (JasonException e) {
+              e.printStackTrace();
             }
           }
         }
       } catch (PerceiveException e) {
-        logger.log(Level.WARNING, "Could not perceive.", e);
+        logger.log(Level.WARNING, "Could not perceive.");
       }
     }
     return percepts;
   }
 
-  @Override
-  public boolean executeAction(String agName, Structure action) {
-    logger.info("executing: " + action + " by " + agName);
-
-    try {
-      String actionName = action.getFunctor();
-
-      switch (actionName) {
-        case "move":
-          return model.moveTowards(agName, action.getTerm(0).toString());
-        case "request":
-          return model.requestBlock(agName, action.getTerm(0).toString());
-        case "attach":
-          return model.attachBlock(agName, action.getTerm(0).toString());
-        case "move_best_random_direction":
-          int targetX = (int) ((NumberTerm) action.getTerm(0)).solve();
-          int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
-          String bestDir = model.chooseBestDirection(agName, targetX, targetY);
-          return model.moveTowards(agName, bestDir);
-        default:
-          return super.executeAction(agName, action);
-      }
-    } catch (Exception e) {
-      logger.log(Level.SEVERE, "Error executing action " + action, e);
-      return false;
-    }
-  }
-
-  /** Called before the end of MAS execution */
-  @Override
-  public void stop() {
-    if (ei != null) {
+  private Collection<Literal> perceptsToLiterals(Collection<Percept> percepts) {
+    List<Literal> literals = new ArrayList<>();
+    for (Percept p : percepts) {
       try {
-        if (ei.isKillSupported()) ei.kill();
+        literals.add(perceptToLiteral(p));
       } catch (Exception e) {
-        e.printStackTrace();
+        logger.warning(
+          "Failed to convert percept to literal: " + p + " - " + e.getMessage()
+        );
       }
     }
-    super.stop();
+    return literals;
   }
 
-  private Literal perceptToLiteral(Percept per) throws Exception {
+  private static Literal perceptToLiteral(Percept per) throws JasonException {
     Literal l = ASSyntax.createLiteral(per.getName());
-    for (Parameter param : per.getParameters()) {
-      if (param instanceof Numeral) {
-        l.addTerm(
-          ASSyntax.createNumber(((Numeral) param).getValue().doubleValue())
-        );
-      } else if (param instanceof Identifier) {
-        l.addTerm(ASSyntax.createAtom(((Identifier) param).getValue()));
-      }
-    }
+    for (Parameter par : per.getParameters()) l.addTerm(parameterToTerm(par));
     return l;
   }
 
@@ -188,6 +165,25 @@ public class EISAdapter extends Environment implements AgentListener {
       return l;
     }
     throw new JasonException("The type of parameter " + par + " is unknown!");
+  }
+
+  @Override
+  public boolean executeAction(String agName, Structure action) {
+    if (ei == null) {
+      logger.warning(
+        "There is no environment loaded! Ignoring action " + action
+      );
+      return false;
+    }
+
+    try {
+      ei.performAction(agName, literalToAction(action));
+      return true;
+    } catch (ActException e) {
+      e.printStackTrace();
+    }
+
+    return false;
   }
 
   private static Action literalToAction(Literal action) {
@@ -227,5 +223,17 @@ public class EISAdapter extends Environment implements AgentListener {
       }
     }
     return new Identifier(t.toString());
+  }
+
+  @Override
+  public void stop() {
+    if (ei != null) {
+      try {
+        if (ei.isKillSupported()) ei.kill();
+      } catch (Exception e) {
+        e.printStackTrace();
+      }
+    }
+    super.stop();
   }
 }
